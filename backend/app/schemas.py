@@ -22,6 +22,7 @@ class QuoteRow(BaseModel):
 
 class PositionPendingOrder(BaseModel):
     id: str
+    tradeDate: str
     side: Literal["BUY", "SELL"]
     price: float
     shares: int

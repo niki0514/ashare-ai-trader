@@ -31,6 +31,28 @@ uv run python -m app
 
 服务默认监听：`http://localhost:3001`
 
+默认数据库已改为用户本地目录：`~/.ashare-ai-trader/ashare_ai_trader.db`。
+
+- 如果你的机器上已有旧库 `backend/data/ashare_ai_trader.db`，首次启动会自动迁移到新位置
+- 如果要切换到外部数据库，直接设置 `ASHARE_DATABASE_URL`
+- 如果不希望启动时自动写入 demo 用户和样例成交，设置 `ASHARE_BOOTSTRAP_DEMO_DATA=false`
+
+### 独立初始化数据库
+
+```bash
+cd backend
+uv run python -m app.bootstrap
+```
+
+常见用法：
+
+```bash
+# 初始化外部数据库并保留空库
+ASHARE_DATABASE_URL="postgresql+<driver>://user:pass@host:5432/ashare" \
+ASHARE_BOOTSTRAP_DEMO_DATA=false \
+uv run python -m app.bootstrap --no-seed-demo
+```
+
 ## 测试
 
 ```bash
@@ -98,4 +120,6 @@ uv run --with pytest --with pytest-asyncio pytest -q tests/test_smoke_e2e.py
 
 ## 说明
 
-- 本地 SQLite 数据库存放在 `backend/data/ashare_ai_trader.db`，已加入忽略规则。
+- 测试现在使用独立临时数据库，不再污染运行库。
+- 默认运行库位于 `~/.ashare-ai-trader/ashare_ai_trader.db`。
+- 更完整的数据库解耦与数据入库方案见 `../docs/database-decoupling-and-ingestion.md`。

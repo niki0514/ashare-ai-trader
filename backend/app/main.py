@@ -9,8 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
+from .bootstrap import bootstrap_database
 from .config import settings
-from .db import Base, SessionLocal, engine, session_scope
+from .db import SessionLocal
 from .import_io import build_import_template, parse_import_file
 from .import_service import ImportService
 from .market import market_clock
@@ -37,13 +38,7 @@ from .services import (
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    with session_scope() as session:
-        seed = SeedService(session)
-        seed.ensure_seed_data(settings.default_user_id)
-        pnl_service = PnlService(session)
-        for day in sorted(SEED_CLOSE_PRICES.keys()):
-            pnl_service.recompute_daily_pnl(settings.default_user_id, day, use_realtime=False, is_final=True)
+    bootstrap_database()
     await start_engine_if_needed()
     try:
         yield
@@ -66,6 +61,10 @@ def get_db() -> Iterator[Session]:
     session = SessionLocal()
     try:
         yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
     finally:
         session.close()
 

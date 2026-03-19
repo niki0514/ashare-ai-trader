@@ -29,6 +29,7 @@ export type PositionRow = {
   todayReturn: number;
   pendingOrders: Array<{
     id: string;
+    tradeDate: string;
     side: "BUY" | "SELL";
     price: number;
     shares: number;

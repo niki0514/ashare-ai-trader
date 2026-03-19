@@ -45,7 +45,8 @@ uv run --with pytest --with pytest-asyncio pytest -q tests/test_smoke_e2e.py
 - Frontend API contract remains unchanged: `/api/dashboard`, `/api/positions`, `/api/history`, `/api/pnl/*`, `/api/imports/*`, `/api/quotes`
 - Default user is `test`; user isolation is supported via request header `X-User-Id`
 - During market hours, the backend polls Tencent quotes and persists trades in real time
-- After market close, close prices and the day’s frozen PnL snapshot are persisted to SQLite
+- After market close, close prices and the day’s frozen PnL snapshot are persisted to the configured database
+- The default runtime database now lives outside the repo at `~/.ashare-ai-trader/ashare_ai_trader.db`
 
 ## PnL Source of Truth
 
@@ -60,3 +61,4 @@ uv run --with pytest --with pytest-asyncio pytest -q tests/test_smoke_e2e.py
 - 收益真值基线以当前 Python 后端回归测试为准，不再依赖历史迁移样本
 
 See `backend/README.md` for more details.
+Database decoupling and ingestion notes live in `docs/database-decoupling-and-ingestion.md`.

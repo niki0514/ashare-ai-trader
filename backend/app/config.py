@@ -6,9 +6,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-DEFAULT_DB_PATH = DATA_DIR / "ashare_ai_trader.db"
+LEGACY_DATA_DIR = BASE_DIR / "data"
+LEGACY_DB_PATH = LEGACY_DATA_DIR / "ashare_ai_trader.db"
+APP_HOME_DIR = Path.home() / ".ashare-ai-trader"
+DEFAULT_DB_PATH = APP_HOME_DIR / "ashare_ai_trader.db"
 
 
 class Settings(BaseSettings):
@@ -18,6 +19,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 3001
     database_url: str = f"sqlite:///{DEFAULT_DB_PATH}"
+    bootstrap_demo_data: bool = True
     default_user_id: str = "test"
     default_user_name: str = "Test User"
     initial_cash: float = 500000.0

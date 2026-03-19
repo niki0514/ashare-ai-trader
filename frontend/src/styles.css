@@ -1075,12 +1075,27 @@ tbody tr:hover,
 }
 
 .import-toolbar-head {
-  align-items: center;
-  justify-content: flex-end;
+  align-items: flex-start;
+  justify-content: space-between;
 }
 
 .import-toolbar-actions {
   justify-content: flex-end;
+}
+
+.import-section-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.import-section-copy h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.import-section-copy p {
+  margin: 0;
+  max-width: 560px;
 }
 
 .import-workflow-block {
@@ -1161,10 +1176,17 @@ tbody tr:hover,
   text-align: right;
 }
 
+.import-draft-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
 .manual-grid-head {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 10px;
 }
 
@@ -1186,6 +1208,7 @@ tbody tr:hover,
 .manual-grid-row-fields {
   display: grid;
   grid-template-columns:
+    44px
     minmax(108px, 1fr)
     minmax(92px, 0.82fr)
     minmax(100px, 0.86fr)
@@ -1227,6 +1250,32 @@ tbody tr:hover,
 
 .manual-grid-body-row:hover {
   background: rgba(27, 92, 255, 0.04);
+}
+
+.manual-grid-body-row.is-selected {
+  background: rgba(27, 92, 255, 0.08);
+}
+
+.manual-select-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+.manual-select-checkbox {
+  width: 16px !important;
+  height: 16px !important;
+  min-height: 16px;
+  padding: 0 !important;
+  border-radius: 4px !important;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.manual-select-checkbox:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
 }
 
 .manual-field {
@@ -1517,7 +1566,7 @@ button {
 
   .manual-grid-header,
   .manual-grid-row-fields {
-    min-width: 664px;
+    min-width: 708px;
   }
 }
 

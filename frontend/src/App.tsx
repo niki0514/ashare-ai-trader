@@ -30,8 +30,13 @@ const tabs: Array<{ key: TabKey; label: string }> = [
 
 const WEEKDAY_LABELS = ["一", "二", "三", "四", "五", "六", "日"];
 
-type ManualInputRow = ManualImportRowInput & {
+type ManualInputRow = {
   id: string;
+  symbol: string;
+  side: ManualImportRowInput["side"];
+  price: string;
+  lots: string;
+  validity: ManualImportRowInput["validity"];
 };
 
 const MANUAL_SIDE_OPTIONS: Array<{ value: ManualImportRowInput["side"]; label: string }> = [
@@ -52,8 +57,8 @@ function createManualInputRow(seed: Partial<ManualImportRowInput> = {}): ManualI
         : `${Date.now()}-${Math.random()}`,
     symbol: seed.symbol ?? "",
     side: seed.side ?? "BUY",
-    price: seed.price ?? 0,
-    lots: seed.lots ?? 1,
+    price: seed.price === undefined ? "" : String(seed.price),
+    lots: seed.lots === undefined ? "1" : String(seed.lots),
     validity: seed.validity ?? "DAY",
   };
 }
@@ -77,19 +82,32 @@ function createManualRowsFromPreview(rows: ImportPreviewRow[]): ManualInputRow[]
 function isManualRowTouched(row: ManualInputRow) {
   return (
     row.symbol.trim() !== "" ||
-    Number(row.price) !== 0 ||
-    Number(row.lots) !== 1 ||
+    row.price.trim() !== "" ||
+    row.lots.trim() !== "1" ||
     row.side !== "BUY" ||
     row.validity !== "DAY"
   );
 }
 
+function parseManualNumber(value: string) {
+  const trimmed = value.trim();
+  return trimmed === "" ? Number.NaN : Number(trimmed);
+}
+
 function isManualRowComplete(row: ManualInputRow) {
-  return row.symbol.trim() !== "" && Number(row.price) > 0 && Number(row.lots) > 0;
+  return (
+    row.symbol.trim() !== "" &&
+    parseManualNumber(row.price) > 0 &&
+    parseManualNumber(row.lots) > 0
+  );
 }
 
 function tradeSideLabel(side: "BUY" | "SELL") {
   return side === "BUY" ? "买入" : "卖出";
+}
+
+function validityLabel(validity: ManualImportRowInput["validity"]) {
+  return validity === "DAY" ? "当日有效" : "持续有效";
 }
 
 function tradeDateOf(value: string) {
@@ -402,6 +420,7 @@ function PositionsTab({ rows }: { rows: PositionRow[] }) {
               <table className="pending-orders-table">
                 <thead>
                   <tr>
+                    <th>目标交易日</th>
                     <th>股票代码</th>
                     <th>名称</th>
                     <th>操作</th>
@@ -413,6 +432,7 @@ function PositionsTab({ rows }: { rows: PositionRow[] }) {
                 <tbody>
                   {row.pendingOrders.map((order) => (
                     <tr key={order.id}>
+                      <td>{order.tradeDate}</td>
                       <td>{row.symbol}</td>
                       <td>{row.name}</td>
                       <td>{order.side === "BUY" ? "买入" : "卖出"}</td>
@@ -888,13 +908,11 @@ function PnlTab({
           <div className="daily-detail-header">
             <div className="daily-detail-title-block">
               <div className="daily-detail-title-row">
-                <h3>交易日损益明细</h3>
+                <h3>交易日明细</h3>
               </div>
             </div>
             <div className="daily-detail-date-block">
-              <span className="daily-detail-date-label">选中日期</span>
               <strong>{selectedDate}</strong>
-              <span>{selectedRow ? "组合当日收益" : "当前日期暂无收益汇总"}</span>
             </div>
           </div>
 
@@ -997,66 +1015,103 @@ function ImportTab({
   onImportCommitted: () => Promise<unknown> | unknown;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [downloadingTemplate, setDownloadingTemplate] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
+  const [validatingSelection, setValidatingSelection] = useState(false);
   const [submittingImport, setSubmittingImport] = useState(false);
-  const [draftBatchId, setDraftBatchId] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<string>("");
-  const [importFeedback, setImportFeedback] = useState<{
+  const [draftFeedback, setDraftFeedback] = useState<{
+    tone: "success" | "error";
+    text: string;
+  } | null>(null);
+  const [validationFeedback, setValidationFeedback] = useState<{
     tone: "success" | "error";
     text: string;
   } | null>(null);
   const [isDraftDirty, setIsDraftDirty] = useState(false);
+  const [draftFileName, setDraftFileName] = useState<string>("");
+  const [selectedDraftRowIds, setSelectedDraftRowIds] = useState<string[]>([]);
+  const [validationBatchId, setValidationBatchId] = useState<string | null>(null);
   const [manualRows, setManualRows] = useState<ManualInputRow[]>([createManualInputRow()]);
   const isImportWindowOpen = marketStatus === "pre_open" || marketStatus === "closed";
 
   const touchedManualRows = useMemo(() => manualRows.filter(isManualRowTouched), [manualRows]);
   const hasIncompleteManualRows = touchedManualRows.some((row) => !isManualRowComplete(row));
-  const hasPendingChanges = isDraftDirty && (touchedManualRows.length > 0 || selectedFile !== null);
-  const normalizedManualRows = touchedManualRows.map((row) => ({
+  const normalizedManualRows: ManualImportRowInput[] = touchedManualRows.map((row) => ({
     symbol: row.symbol.trim().toUpperCase(),
     side: row.side,
-    price: Number(row.price),
-    lots: Number(row.lots),
+    price: parseManualNumber(row.price),
+    lots: parseManualNumber(row.lots),
     validity: row.validity,
   }));
+  const completeDraftRows = useMemo(
+    () => manualRows.filter((row) => isManualRowComplete(row)),
+    [manualRows],
+  );
+  const completeDraftRowIds = useMemo(
+    () => new Set(completeDraftRows.map((row) => row.id)),
+    [completeDraftRows],
+  );
+  const selectedDraftRowIdSet = useMemo(
+    () => new Set(selectedDraftRowIds),
+    [selectedDraftRowIds],
+  );
+  const selectedDraftRows = useMemo(
+    () => completeDraftRows.filter((row) => selectedDraftRowIdSet.has(row.id)),
+    [completeDraftRows, selectedDraftRowIdSet],
+  );
   const canSaveManualDraft = normalizedManualRows.length > 0 && !hasIncompleteManualRows;
-  const canSubmitImport =
-    draftBatchId !== null &&
-    !hasPendingChanges &&
-    !hasIncompleteManualRows &&
-    previewRows.length > 0;
+  const canValidateSelection = selectedDraftRows.length > 0;
+  const canSubmitImport = validationBatchId !== null && previewRows.length > 0;
+  const allDraftRowsSelected =
+    completeDraftRows.length > 0 && selectedDraftRows.length === completeDraftRows.length;
+  const isWorking =
+    uploading ||
+    downloadingTemplate ||
+    savingDraft ||
+    validatingSelection ||
+    submittingImport;
 
-  const statusText = importFeedback?.text
-    ? importFeedback.text
+  useEffect(() => {
+    setSelectedDraftRowIds((currentIds) =>
+      currentIds.filter((id) => completeDraftRowIds.has(id)),
+    );
+  }, [completeDraftRowIds]);
+
+  const draftStatusText = draftFeedback?.text
+    ? draftFeedback.text
     : hasIncompleteManualRows
-      ? "请补全未完成行"
-      : hasPendingChanges
-        ? "内容已修改"
+      ? "请补全草稿中的未完成行"
+      : isDraftDirty
+        ? "草稿内容已修改"
         : draftSavedAt
           ? `草稿已保存 ${draftSavedAt}`
           : "未保存草稿";
+  const validationStatusText = validationFeedback?.text
+    ? validationFeedback.text
+    : previewRows.length > 0
+      ? `已完成 ${previewRows.length} 条校验`
+      : selectedDraftRows.length > 0
+        ? `已选中 ${selectedDraftRows.length} 条，可进入下方校验`
+        : "请选择草稿中的完整行进入下方校验";
 
-  function clearDraftPreview() {
-    setDraftBatchId(null);
-    setDraftSavedAt("");
+  function resetValidationPreview() {
+    setValidationBatchId(null);
+    setValidationFeedback(null);
     onPreviewUpdate(null);
   }
 
   function markDraftDirty() {
     setIsDraftDirty(true);
-    setImportFeedback(null);
-    clearDraftPreview();
+    setDraftFeedback(null);
+    resetValidationPreview();
   }
 
-  function applyDraftSaved(response: ImportPreviewResponse, nextRows?: ManualInputRow[]) {
-    onPreviewUpdate(response);
+  function applyDraftSaved(nextRows?: ManualInputRow[], successText = "草稿已保存") {
     if (nextRows) {
       setManualRows(nextRows);
     }
-    setDraftBatchId(response.batchId);
     setDraftSavedAt(
       new Date().toLocaleTimeString("zh-CN", {
         hour: "2-digit",
@@ -1066,13 +1121,14 @@ function ImportTab({
       }),
     );
     setIsDraftDirty(false);
-    setImportFeedback({ tone: "success", text: "草稿已保存" });
+    setDraftFeedback({ tone: "success", text: successText });
+    resetValidationPreview();
   }
 
-  function updateManualRow<K extends keyof ManualImportRowInput>(
+  function updateManualRow<K extends Exclude<keyof ManualInputRow, "id">>(
     id: string,
     key: K,
-    value: ManualImportRowInput[K],
+    value: ManualInputRow[K],
   ) {
     markDraftDirty();
     setManualRows((currentRows) =>
@@ -1115,52 +1171,50 @@ function ImportTab({
   }
 
   function resetManualRows() {
-    setImportFeedback(null);
+    setDraftFeedback(null);
+    setValidationFeedback(null);
     setIsDraftDirty(false);
-    setSelectedFile(null);
-    clearDraftPreview();
+    setDraftSavedAt("");
+    setDraftFileName("");
+    setSelectedDraftRowIds([]);
+    setValidationBatchId(null);
+    onPreviewUpdate(null);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
     setManualRows([createManualInputRow()]);
   }
 
-  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
-    const nextFile = event.target.files?.[0] ?? null;
-    if (!nextFile) {
-      return;
-    }
-    markDraftDirty();
-    setSelectedFile(nextFile);
-  }
-
-  async function handleUpload() {
-    if (!selectedFile) {
-      return;
-    }
-
-    setImportFeedback(null);
+  async function handleUpload(file: File) {
+    setDraftFeedback(null);
     setUploading(true);
 
     try {
       const response = await api.uploadImportFile({
-        file: selectedFile,
+        file,
         targetTradeDate,
         mode: "DRAFT",
       });
-      applyDraftSaved(response, createManualRowsFromPreview(response.rows));
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
+      setDraftFileName(file.name);
+      setSelectedDraftRowIds([]);
+      applyDraftSaved(createManualRowsFromPreview(response.rows), "文件已导入草稿");
     } catch (error) {
-      setImportFeedback({
+      setDraftFeedback({
         tone: "error",
         text: error instanceof Error ? error.message : "上传失败",
       });
-      return;
     } finally {
       setUploading(false);
     }
+  }
+
+  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const nextFile = event.target.files?.[0] ?? null;
+    event.target.value = "";
+    if (!nextFile) {
+      return;
+    }
+    void handleUpload(nextFile);
   }
 
   async function handleSaveDraft() {
@@ -1168,24 +1222,23 @@ function ImportTab({
       return;
     }
 
-    setImportFeedback(null);
+    setDraftFeedback(null);
     setSavingDraft(true);
 
     try {
-      const response = await api.previewImports({
+      await api.previewImports({
         targetTradeDate,
         mode: "DRAFT",
         sourceType: "MANUAL",
         rows: normalizedManualRows,
       });
 
-      applyDraftSaved(response);
+      applyDraftSaved(undefined, "草稿已保存");
     } catch (error) {
-      setImportFeedback({
+      setDraftFeedback({
         tone: "error",
         text: error instanceof Error ? error.message : "保存草稿失败",
       });
-      return;
     } finally {
       setSavingDraft(false);
     }
@@ -1205,36 +1258,84 @@ function ImportTab({
       link.remove();
       URL.revokeObjectURL(url);
     } catch (error) {
-      setImportFeedback({
+      setDraftFeedback({
         tone: "error",
         text: error instanceof Error ? error.message : "下载模板失败",
       });
-      return;
     } finally {
       setDownloadingTemplate(false);
     }
   }
 
-  async function handleImportSubmit() {
-    if (!canSubmitImport || !draftBatchId || !isImportWindowOpen) {
+  function toggleDraftRowSelected(id: string, checked: boolean) {
+    setSelectedDraftRowIds((currentIds) => {
+      if (checked) {
+        return currentIds.includes(id) ? currentIds : [...currentIds, id];
+      }
+
+      return currentIds.filter((currentId) => currentId !== id);
+    });
+  }
+
+  async function handleValidateSelection() {
+    if (!canValidateSelection) {
       return;
     }
 
-    setImportFeedback(null);
+    setValidationFeedback(null);
+    setValidatingSelection(true);
+
+    try {
+      const response = await api.previewImports({
+        targetTradeDate,
+        mode: "DRAFT",
+        sourceType: "MANUAL",
+        fileName: draftFileName || undefined,
+        rows: selectedDraftRows.map((row) => ({
+          symbol: row.symbol.trim().toUpperCase(),
+          side: row.side,
+          price: parseManualNumber(row.price),
+          lots: parseManualNumber(row.lots),
+          validity: row.validity,
+        })),
+      });
+
+      setValidationBatchId(response.batchId);
+      onPreviewUpdate(response);
+      setValidationFeedback({
+        tone: "success",
+        text: `已校验 ${response.rows.length} 条，可在下方提交导入`,
+      });
+    } catch (error) {
+      setValidationFeedback({
+        tone: "error",
+        text: error instanceof Error ? error.message : "校验失败",
+      });
+    } finally {
+      setValidatingSelection(false);
+    }
+  }
+
+  async function handleImportSubmit() {
+    if (!canSubmitImport || !validationBatchId || !isImportWindowOpen) {
+      return;
+    }
+
+    setValidationFeedback(null);
     setSubmittingImport(true);
 
     try {
       const response = await api.commitImports({
-        batchId: draftBatchId,
+        batchId: validationBatchId,
         mode: "APPEND",
       });
-      setDraftBatchId(null);
-      setDraftSavedAt("");
-      setIsDraftDirty(false);
-      setImportFeedback({ tone: "success", text: `已提交 ${response.importedCount} 条` });
+      setValidationBatchId(null);
+      setSelectedDraftRowIds([]);
+      onPreviewUpdate(null);
+      setValidationFeedback({ tone: "success", text: `已提交 ${response.importedCount} 条` });
       await onImportCommitted();
     } catch (error) {
-      setImportFeedback({
+      setValidationFeedback({
         tone: "error",
         text: error instanceof Error ? error.message : "提交导入失败",
       });
@@ -1260,6 +1361,10 @@ function ImportTab({
 
       <article className="input-card import-workflow-card">
         <div className="input-card-head import-toolbar-head">
+          <div className="import-section-copy">
+            <h3>草稿</h3>
+            <p>文件导入后先进入草稿，确认无误后再选中进入下方校验。</p>
+          </div>
           <input
             ref={fileInputRef}
             type="file"
@@ -1271,36 +1376,30 @@ function ImportTab({
             <button
               type="button"
               onClick={() => void handleTemplateDownload()}
-              disabled={uploading || downloadingTemplate || savingDraft || submittingImport}
+              disabled={isWorking}
             >
               {downloadingTemplate ? "下载中..." : "下载模板"}
             </button>
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={uploading || downloadingTemplate || savingDraft || submittingImport}
+              disabled={isWorking}
             >
-              选择文件
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleUpload()}
-              disabled={
-                uploading || downloadingTemplate || savingDraft || submittingImport || !selectedFile
-              }
-            >
-              {uploading ? "上传中..." : "上传并保存草稿"}
+              {uploading ? "导入中..." : "文件导入"}
             </button>
           </div>
         </div>
         <div className="manual-grid-shell">
-          {selectedFile ? <div className="import-file-name">{selectedFile.name}</div> : null}
+          {draftFileName ? <div className="import-file-name">草稿来源：{draftFileName}</div> : null}
           <div className="manual-grid-head">
+            <div className="import-draft-meta">
+              <span className="input-card-tag">已选中 {selectedDraftRows.length} 条完整草稿</span>
+            </div>
             <button
               type="button"
               className="manual-row-icon-button manual-add-button"
               onClick={() => addManualRow()}
-              disabled={savingDraft || uploading || submittingImport}
+              disabled={isWorking}
               aria-label="新增一行"
               title="新增一行"
             >
@@ -1310,6 +1409,20 @@ function ImportTab({
           <div className="manual-grid-layout">
             <div className="manual-grid-table" role="table" aria-label="导入编辑表格">
               <div className="manual-grid-header" role="row">
+                <div className="manual-select-cell">
+                  <input
+                    className="manual-select-checkbox"
+                    type="checkbox"
+                    checked={allDraftRowsSelected}
+                    disabled={isWorking || completeDraftRows.length === 0}
+                    onChange={(event) =>
+                      setSelectedDraftRowIds(
+                        event.target.checked ? completeDraftRows.map((row) => row.id) : [],
+                      )
+                    }
+                    aria-label="全选完整草稿行"
+                  />
+                </div>
                 <span>股票代码</span>
                 <span>方向</span>
                 <span>委托价</span>
@@ -1318,12 +1431,31 @@ function ImportTab({
               </div>
               <div className="manual-grid-body">
                 {manualRows.map((row, index) => (
-                  <div key={row.id} className="manual-grid-body-row" role="row">
+                  <div
+                    key={row.id}
+                    className={`manual-grid-body-row${
+                      selectedDraftRowIdSet.has(row.id) ? " is-selected" : ""
+                    }`}
+                    role="row"
+                  >
                     <div className="manual-grid-row-fields">
+                      <div className="manual-select-cell">
+                        <input
+                          className="manual-select-checkbox"
+                          type="checkbox"
+                          checked={selectedDraftRowIdSet.has(row.id)}
+                          disabled={isWorking || !isManualRowComplete(row)}
+                          onChange={(event) =>
+                            toggleDraftRowSelected(row.id, event.target.checked)
+                          }
+                          aria-label={`选中第 ${index + 1} 行草稿`}
+                        />
+                      </div>
                       <label className="manual-field">
                         <span className="sr-only">第 {index + 1} 行股票代码</span>
                         <input
                           value={row.symbol}
+                          disabled={isWorking}
                           onChange={(event) =>
                             updateManualRow(row.id, "symbol", event.target.value.toUpperCase())
                           }
@@ -1334,6 +1466,7 @@ function ImportTab({
                         <span className="sr-only">第 {index + 1} 行方向</span>
                         <select
                           value={row.side}
+                          disabled={isWorking}
                           onChange={(event) =>
                             updateManualRow(
                               row.id,
@@ -1356,9 +1489,8 @@ function ImportTab({
                           min="0"
                           step="0.01"
                           value={row.price}
-                          onChange={(event) =>
-                            updateManualRow(row.id, "price", Number(event.target.value))
-                          }
+                          disabled={isWorking}
+                          onChange={(event) => updateManualRow(row.id, "price", event.target.value)}
                           placeholder="0.00"
                         />
                       </label>
@@ -1369,9 +1501,8 @@ function ImportTab({
                           min="1"
                           step="1"
                           value={row.lots}
-                          onChange={(event) =>
-                            updateManualRow(row.id, "lots", Number(event.target.value))
-                          }
+                          disabled={isWorking}
+                          onChange={(event) => updateManualRow(row.id, "lots", event.target.value)}
                           placeholder="1"
                         />
                       </label>
@@ -1379,6 +1510,7 @@ function ImportTab({
                         <span className="sr-only">第 {index + 1} 行有效期</span>
                         <select
                           value={row.validity}
+                          disabled={isWorking}
                           onChange={(event) =>
                             updateManualRow(
                               row.id,
@@ -1408,7 +1540,7 @@ function ImportTab({
                       type="button"
                       className="manual-row-icon-button manual-row-icon-button-danger"
                       onClick={() => removeManualRow(row.id)}
-                      disabled={savingDraft || uploading || submittingImport}
+                      disabled={isWorking}
                       aria-label={`删除第 ${index + 1} 行`}
                       title="删除当前行"
                     >
@@ -1424,72 +1556,107 @@ function ImportTab({
           <div className="import-status-row">
             <span
               className={`import-status-note${
-                importFeedback?.tone === "error"
+                draftFeedback?.tone === "error"
                   ? " is-error"
-                  : importFeedback?.tone === "success"
+                  : draftFeedback?.tone === "success"
                     ? " is-success"
                     : ""
               }`}
             >
-              {statusText}
+              {draftStatusText}
             </span>
-            {!isImportWindowOpen ? (
-              <span className="import-status-note">当前仅可保存草稿</span>
-            ) : null}
           </div>
           <div className="button-row footer-actions">
             <button
               type="button"
               onClick={resetManualRows}
-              disabled={savingDraft || uploading || submittingImport}
+              disabled={isWorking}
             >
               清空输入
             </button>
             <button
               type="button"
               onClick={() => void handleSaveDraft()}
-              disabled={savingDraft || uploading || submittingImport || !canSaveManualDraft}
+              disabled={isWorking || !canSaveManualDraft}
             >
               {savingDraft ? "保存中..." : "保存草稿"}
             </button>
             <button
               type="button"
-              onClick={() => void handleImportSubmit()}
-              disabled={
-                savingDraft ||
-                uploading ||
-                submittingImport ||
-                !canSubmitImport ||
-                !isImportWindowOpen
-              }
+              onClick={() => void handleValidateSelection()}
+              disabled={isWorking || !canValidateSelection}
             >
-              {submittingImport ? "提交中..." : "提交导入"}
+              {validatingSelection ? "校验中..." : "选中的进入下方校验"}
             </button>
           </div>
         </div>
       </article>
 
-      {previewRows.length > 0 ? (
-        <DataTable
-          headers={["行号", "股票代码", "方向", "委托价", "手数", "有效期", "校验结果"]}
-          rows={previewRows.map((row) => (
-            <tr key={row.rowNumber}>
-              <td>{row.rowNumber}</td>
-              <td>{row.symbol}</td>
-              <td>{row.side}</td>
-              <td>{row.price.toFixed(2)}</td>
-              <td>{row.lots}</td>
-              <td>{row.validity}</td>
-              <td>
-                <span className={`status-pill validation-${row.validationStatus.toLowerCase()}`}>
-                  {row.validationStatus}
-                </span>
-                <div className="validation-note">{row.validationMessage}</div>
-              </td>
-            </tr>
-          ))}
-        />
-      ) : null}
+      <article className="input-card import-validation-card">
+        <div className="input-card-head">
+          <div className="import-section-copy">
+            <h3>校验与提交</h3>
+            <p>下方只展示已选中并进入校验的记录，提交导入也在这里完成。</p>
+          </div>
+        </div>
+        <div className="import-submit-actions">
+          <div className="import-status-row">
+            <span
+              className={`import-status-note${
+                validationFeedback?.tone === "error"
+                  ? " is-error"
+                  : validationFeedback?.tone === "success"
+                    ? " is-success"
+                    : ""
+              }`}
+            >
+              {validationStatusText}
+            </span>
+            {!isImportWindowOpen ? (
+              <span className="import-status-note">当前仅可保存草稿，暂不可提交导入</span>
+            ) : null}
+          </div>
+          <div className="button-row footer-actions">
+            <button
+              type="button"
+              onClick={resetValidationPreview}
+              disabled={isWorking || previewRows.length === 0}
+            >
+              清空校验
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleImportSubmit()}
+              disabled={isWorking || !canSubmitImport || !isImportWindowOpen}
+            >
+              {submittingImport ? "提交中..." : "提交导入"}
+            </button>
+          </div>
+        </div>
+        {previewRows.length > 0 ? (
+          <DataTable
+            headers={["行号", "股票代码", "方向", "委托价", "手数", "有效期", "校验结果"]}
+            rows={previewRows.map((row) => (
+              <tr key={row.rowNumber}>
+                <td>{row.rowNumber}</td>
+                <td>{row.symbol}</td>
+                <td>{tradeSideLabel(row.side)}</td>
+                <td>{row.price.toFixed(2)}</td>
+                <td>{row.lots}</td>
+                <td>{validityLabel(row.validity)}</td>
+                <td>
+                  <span className={`status-pill validation-${row.validationStatus.toLowerCase()}`}>
+                    {row.validationStatus}
+                  </span>
+                  <div className="validation-note">{row.validationMessage}</div>
+                </td>
+              </tr>
+            ))}
+          />
+        ) : (
+          <div className="empty-panel">草稿中选中完整记录后，点击“选中的进入下方校验”。</div>
+        )}
+      </article>
     </section>
   );
 }

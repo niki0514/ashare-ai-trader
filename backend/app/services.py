@@ -32,6 +32,18 @@ def to_iso(value: datetime | None) -> str:
     return (value or datetime.now()).isoformat()
 
 
+def trade_date_of(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo:
+        return value.astimezone(market_clock.now().tzinfo).date().isoformat()
+    return value.date().isoformat()
+
+
+def quote_matches_trade_date(value: datetime | None, trade_date: str) -> bool:
+    return trade_date_of(value) == trade_date
+
+
 class SeedService:
     def __init__(self, session: Session):
         self.session = session
@@ -325,15 +337,56 @@ class PnlService:
             }
         return grouped
 
+    def _trade_date_symbols(self, user_id: str, trade_date: str) -> list[str]:
+        symbols = {lot.symbol for lot in self.portfolio_repo.open_lots(user_id)}
+        start = datetime.strptime(f"{trade_date} 00:00:00", "%Y-%m-%d %H:%M:%S")
+        end = datetime.strptime(f"{trade_date} 23:59:59", "%Y-%m-%d %H:%M:%S")
+        stmt = select(ExecutionTrade.symbol).where(
+            ExecutionTrade.user_id == user_id,
+            ExecutionTrade.fill_time >= start,
+            ExecutionTrade.fill_time <= end,
+        )
+        symbols.update(self.session.scalars(stmt).all())
+        return sorted(symbols)
+
+    def materialize_close_prices_from_quotes(self, user_id: str, trade_date: str) -> bool:
+        ready_to_finalize = True
+        for symbol in self._trade_date_symbols(user_id, trade_date):
+            current_daily = self.market_repo.get_daily_price(symbol, trade_date)
+            if current_daily and current_daily.is_final:
+                continue
+
+            quote = self.market_repo.get_quote(to_quote_symbol(symbol))
+            if not quote or not quote_matches_trade_date(quote.updated_at, trade_date):
+                ready_to_finalize = False
+                continue
+
+            previous_daily = self.market_repo.previous_daily_price(symbol, trade_date)
+            self.market_repo.upsert_daily_price(
+                symbol=symbol,
+                symbol_name=quote.symbol_name or (current_daily.symbol_name if current_daily else symbol),
+                trade_date=trade_date,
+                close_price=quote.price,
+                open_price=quote.open_price or (current_daily.open_price if current_daily else quote.price),
+                previous_close=quote.previous_close or (previous_daily.close_price if previous_daily else quote.price),
+                high_price=quote.high_price or quote.price,
+                low_price=quote.low_price or quote.price,
+                is_final=True,
+                source="close_settlement",
+            )
+        return ready_to_finalize
+
     def _price_snapshot(self, symbol: str, shares: int, fallback: float, trade_date: str, use_realtime: bool) -> tuple[float, float, float]:
         quote = self.market_repo.get_quote(to_quote_symbol(symbol))
-        daily = self.market_repo.latest_daily_price(symbol, trade_date)
-        if use_realtime and quote:
-            open_price = quote.open_price or daily.open_price if daily else quote.open_price
-            close_price = quote.price
+        exact_daily = self.market_repo.get_daily_price(symbol, trade_date)
+        daily = exact_daily or self.market_repo.latest_daily_price(symbol, trade_date)
+        fresh_quote = quote if quote and quote_matches_trade_date(quote.updated_at, trade_date) else None
+        if use_realtime and fresh_quote:
+            open_price = fresh_quote.open_price or (daily.open_price if daily else fresh_quote.open_price)
+            close_price = fresh_quote.price
         else:
-            close_price = daily.close_price if daily else (quote.price if quote else fallback)
-            open_price = daily.open_price if daily else (quote.open_price if quote else fallback)
+            close_price = daily.close_price if daily else (fresh_quote.price if fresh_quote else fallback)
+            open_price = daily.open_price if daily else (fresh_quote.open_price if fresh_quote else fallback)
         return open_price or fallback, close_price or fallback, shares * (close_price or fallback)
 
     def recompute_daily_pnl(self, user_id: str, trade_date: str, *, use_realtime: bool, is_final: bool = False) -> dict:
@@ -503,8 +556,12 @@ class QueryService:
         if use_intraday_quote:
             self.pnl_service.recompute_daily_pnl(user_id, trade_date, use_realtime=True, is_final=False)
             daily = self.pnl_repo.get_daily_pnl(user_id, trade_date)
-        elif not daily:
-            self.pnl_service.recompute_daily_pnl(user_id, trade_date, use_realtime=False, is_final=market_session.market_status == "closed")
+        elif market_session.market_status == "closed":
+            can_finalize = self.pnl_service.materialize_close_prices_from_quotes(user_id, trade_date)
+            self.pnl_service.recompute_daily_pnl(user_id, trade_date, use_realtime=False, is_final=can_finalize)
+            daily = self.pnl_repo.get_daily_pnl(user_id, trade_date)
+        elif not daily or not daily.is_final:
+            self.pnl_service.recompute_daily_pnl(user_id, trade_date, use_realtime=False, is_final=False)
             daily = self.pnl_repo.get_daily_pnl(user_id, trade_date)
 
         latest_cash = self.portfolio_repo.latest_cash(user_id)
@@ -512,11 +569,12 @@ class QueryService:
         position_market_value = 0.0
         for lot in open_lots:
             quote = self.market_repo.get_quote(to_quote_symbol(lot.symbol))
-            daily_price = self.market_repo.latest_daily_price(lot.symbol, trade_date)
+            fresh_quote = quote if quote and quote_matches_trade_date(quote.updated_at, trade_date) else None
+            daily_price = self.market_repo.get_daily_price(lot.symbol, trade_date) or self.market_repo.latest_daily_price(lot.symbol, trade_date)
             if use_intraday_quote:
-                price = quote.price if quote else (daily_price.close_price if daily_price else lot.cost_price)
+                price = fresh_quote.price if fresh_quote else (daily_price.close_price if daily_price else lot.cost_price)
             else:
-                price = daily_price.close_price if daily_price else (quote.price if quote else lot.cost_price)
+                price = daily_price.close_price if daily_price else (fresh_quote.price if fresh_quote else lot.cost_price)
             position_market_value += lot.remaining_shares * price
 
         available_cash = latest_cash.balance_after if latest_cash else 0.0
@@ -578,12 +636,17 @@ class QueryService:
             frozen = sum(o.shares for o in pending)
             display_sellable = max(0, row["sellableShares"] - frozen)
             quote = self.market_repo.get_quote(to_quote_symbol(symbol))
-            daily_price = self.market_repo.latest_daily_price(symbol, trade_date)
+            fresh_quote = quote if quote and quote_matches_trade_date(quote.updated_at, trade_date) else None
+            daily_price = self.market_repo.get_daily_price(symbol, trade_date) or self.market_repo.latest_daily_price(symbol, trade_date)
             if use_intraday_quote:
-                quote_price = quote.price if quote else (daily_price.close_price if daily_price else row["lastPrice"])
-                previous_close = quote.previous_close if quote else previous_close_by_symbol.get(symbol, row["costPrice"])
+                quote_price = fresh_quote.price if fresh_quote else (daily_price.close_price if daily_price else row["lastPrice"])
+                previous_close = (
+                    fresh_quote.previous_close
+                    if fresh_quote
+                    else previous_close_by_symbol.get(symbol, row["costPrice"])
+                )
             else:
-                quote_price = daily_price.close_price if daily_price else (quote.price if quote else row["lastPrice"])
+                quote_price = daily_price.close_price if daily_price else (fresh_quote.price if fresh_quote else row["lastPrice"])
                 previous_close = previous_close_by_symbol.get(symbol, quote_price)
 
             market_value = row["shares"] * quote_price
@@ -606,6 +669,7 @@ class QueryService:
                     "pendingOrders": [
                         {
                             "id": o.id,
+                            "tradeDate": o.trade_date,
                             "side": o.side.value,
                             "price": o.limit_price,
                             "shares": o.shares,
@@ -906,42 +970,8 @@ class TradingService:
         return processed
 
     def _settle_close(self, user_id: str, trade_date: str) -> None:
-        existing = self.pnl_repo.get_daily_pnl(user_id, trade_date)
-        if existing and existing.is_final:
-            return
-
-        symbols = set()
-        symbols.update(l.symbol for l in self.portfolio_repo.open_lots(user_id))
-        start = datetime.strptime(f"{trade_date} 00:00:00", "%Y-%m-%d %H:%M:%S")
-        end = datetime.strptime(f"{trade_date} 23:59:59", "%Y-%m-%d %H:%M:%S")
-        stmt = select(ExecutionTrade).where(ExecutionTrade.user_id == user_id, ExecutionTrade.fill_time >= start, ExecutionTrade.fill_time <= end)
-        for trade in self.session.scalars(stmt).all():
-            symbols.add(trade.symbol)
-
-        for symbol in symbols:
-            quote = self.market_repo.get_quote(to_quote_symbol(symbol))
-            existing_daily = self.market_repo.latest_daily_price(symbol, trade_date)
-            close_price = quote.price if quote else (existing_daily.close_price if existing_daily else 0.0)
-            if close_price <= 0:
-                continue
-            open_price = quote.open_price if quote else (existing_daily.open_price if existing_daily else close_price)
-            prev_close = quote.previous_close if quote else (existing_daily.previous_close if existing_daily else close_price)
-            high = quote.high_price if quote else (existing_daily.high_price if existing_daily else close_price)
-            low = quote.low_price if quote else (existing_daily.low_price if existing_daily else close_price)
-            self.market_repo.upsert_daily_price(
-                symbol=symbol,
-                symbol_name=(quote.symbol_name if quote else (existing_daily.symbol_name if existing_daily else symbol)),
-                trade_date=trade_date,
-                close_price=close_price,
-                open_price=open_price,
-                previous_close=prev_close,
-                high_price=high,
-                low_price=low,
-                is_final=True,
-                source="close_settlement",
-            )
-
-        self.pnl_service.recompute_daily_pnl(user_id, trade_date, use_realtime=False, is_final=True)
+        can_finalize = self.pnl_service.materialize_close_prices_from_quotes(user_id, trade_date)
+        self.pnl_service.recompute_daily_pnl(user_id, trade_date, use_realtime=False, is_final=can_finalize)
         self._expire_day_orders(user_id, trade_date)
 
     async def tick(self, user_id: str) -> int:

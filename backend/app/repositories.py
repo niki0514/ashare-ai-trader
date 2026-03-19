@@ -430,6 +430,10 @@ class MarketDataRepository:
     def __init__(self, session: Session):
         self.session = session
 
+    def get_daily_price(self, symbol: str, trade_date: str) -> DailyPrice | None:
+        stmt = select(DailyPrice).where(DailyPrice.symbol == symbol, DailyPrice.trade_date == trade_date)
+        return self.session.scalar(stmt)
+
     def upsert_quote_snapshot(self, row: dict) -> QuoteSnapshot:
         stmt = select(QuoteSnapshot).where(QuoteSnapshot.symbol == row["symbol"])
         existing = self.session.scalar(stmt)
@@ -510,6 +514,14 @@ class MarketDataRepository:
         if trade_date_lte:
             stmt = stmt.where(DailyPrice.trade_date <= trade_date_lte)
         stmt = stmt.order_by(DailyPrice.trade_date.desc())
+        return self.session.scalar(stmt)
+
+    def previous_daily_price(self, symbol: str, trade_date: str) -> DailyPrice | None:
+        stmt = (
+            select(DailyPrice)
+            .where(DailyPrice.symbol == symbol, DailyPrice.trade_date < trade_date)
+            .order_by(DailyPrice.trade_date.desc())
+        )
         return self.session.scalar(stmt)
 
     def list_daily_prices(self, trade_date: str) -> list[DailyPrice]:

@@ -29,6 +29,17 @@ npm run dev
 
 Frontend runs on `http://localhost:5173`.
 
+## Smoke 验收（推荐）
+
+```bash
+cd backend
+uv run --with pytest --with pytest-asyncio pytest -q tests/test_smoke_e2e.py
+```
+
+该链路覆盖：模板下载/上传预览 -> commit 导入 -> 挂单回读 -> dashboard/positions/history/pnl 关键接口回读。
+
+前端目前仍建议人工页面验收（见下方 Frontend 启动步骤），后端验收优先使用上述可重复 API smoke。
+
 ## Backend Notes
 
 - Frontend API contract remains unchanged: `/api/dashboard`, `/api/positions`, `/api/history`, `/api/pnl/*`, `/api/imports/*`, `/api/quotes`

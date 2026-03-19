@@ -38,6 +38,28 @@ cd backend
 uv run --with pytest --with pytest-asyncio pytest -q
 ```
 
+### API 级 E2E Smoke（最小可验收）
+
+```bash
+cd backend
+uv run --with pytest --with pytest-asyncio pytest -q tests/test_smoke_e2e.py
+```
+
+该 smoke 用例覆盖：
+
+1. 下载导入模板：`GET /api/imports/template`
+2. 上传并预览导入：`POST /api/imports/upload`
+3. commit 导入：`POST /api/imports/commit`
+4. 挂单回读：`GET /api/orders/pending`
+5. 关键接口回读：
+   - `GET /api/dashboard`
+   - `GET /api/positions`
+   - `GET /api/history`
+   - `GET /api/pnl/calendar`
+   - `GET /api/pnl/daily/{date}`
+
+> 说明：该用例是 API 级可重复验收链路，不依赖浏览器点击流。
+
 当前已验证：
 
 - `history` 成交流水可回放 11 笔测试成交

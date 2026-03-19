@@ -1,0 +1,32 @@
+[project]
+name = "ashare-ai-trader-backend-py"
+version = "0.1.0"
+description = "Python backend for A-share AI Trader"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "sqlalchemy>=2.0.36",
+  "pydantic>=2.10.0",
+  "pydantic-settings>=2.6.0",
+  "httpx>=0.27.0",
+  "python-multipart>=0.0.9",
+  "openpyxl>=3.1.5"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0"
+]
+
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]

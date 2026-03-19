@@ -252,6 +252,7 @@ function PositionsTab({ rows }: { rows: PositionRow[] }) {
 
   return (
     <section className="positions-layout">
+      <p className="validation-note">口径说明：今日盈亏 = 剩余持仓 ×（现价 - 昨收）；浮盈亏 = 剩余持仓 ×（现价 - 成本价）。</p>
       <DataTable
         headers={["股票代码", "名称", "持仓数量", "可卖数量", "卖出冻结数量", "成本价", "现价", "市值", "今日盈亏", "今日盈亏比例", "浮盈亏", "收益率"]}
         rows={
@@ -484,6 +485,7 @@ function PnlTab({
             <div>
               <p className="detail-kicker">Linked detail</p>
               <h3>交易日损益明细</h3>
+              <p className="validation-note">本页按账户资产变动口径展示：日历汇总 = 当日明细求和；持仓页“今日盈亏”仅反映剩余持仓对昨收的变动，不等于组合日收益。</p>
             </div>
             <div className="daily-detail-date-block">
               <strong>{selectedDate}</strong>

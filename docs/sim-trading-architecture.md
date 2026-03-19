@@ -292,12 +292,12 @@ Response should include:
 - Build backend mock APIs
 - Add Tencent quote proxy
 - Implement market-session-aware polling every second
-- Finalize Prisma schema
+- Finalize backend data schema
 
 ### Phase 2
 
 - Connect frontend data import flow to backend preview and commit APIs
-- Replace mock repositories with Prisma persistence
+- Replace mock repositories with Python persistence
 - Add execution engine and scheduled intraday checks
 
 ### Phase 3

@@ -120,8 +120,6 @@ def get_daily_detail(date: str, db: Session = Depends(get_db), user_id: str = De
 
 @app.post("/api/imports/preview", response_model=ImportPreviewResponse)
 def preview_imports(payload: PreviewImportsRequest, db: Session = Depends(get_db), user_id: str = Depends(get_user_id)):
-    if not market_clock.is_import_window_open():
-        raise HTTPException(status_code=403, detail="仅允许在交易所收盘后或开盘前导入数据")
     rows = [
         {
             "rowNumber": idx + 1,
@@ -155,8 +153,6 @@ async def upload_import_file(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    if not market_clock.is_import_window_open():
-        raise HTTPException(status_code=403, detail="仅允许在交易所收盘后或开盘前导入数据")
     content = await file.read()
     try:
         parsed = parse_import_file(file.filename or "upload.xlsx", content)
@@ -185,8 +181,13 @@ def download_import_template(targetTradeDate: str | None = None):
 @app.post("/api/imports/commit", response_model=ImportCommitResponse)
 def commit_imports(payload: CommitImportsRequest, db: Session = Depends(get_db), user_id: str = Depends(get_user_id)):
     if not market_clock.is_import_window_open():
-        raise HTTPException(status_code=403, detail="仅允许在交易所收盘后或开盘前导入数据")
-    result = ImportService(db).commit_import_batch(payload.batchId, payload.mode)
+        raise HTTPException(status_code=403, detail="仅允许在交易所收盘后或开盘前提交导入")
+    try:
+        result = ImportService(db).commit_import_batch(user_id, payload.batchId, payload.mode)
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 409 if detail == "Import batch already committed" else 404
+        raise HTTPException(status_code=status_code, detail=detail) from exc
     db.commit()
     return result
 

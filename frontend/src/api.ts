@@ -24,6 +24,28 @@ export type ManualImportRowInput = {
   validity: "DAY" | "GTC";
 };
 
+async function readErrorMessage(response: Response): Promise<string> {
+  const contentType = response.headers.get("content-type") ?? "";
+
+  try {
+    if (contentType.includes("application/json")) {
+      const payload = (await response.json()) as { detail?: string };
+      if (typeof payload.detail === "string" && payload.detail.trim() !== "") {
+        return payload.detail;
+      }
+    } else {
+      const text = await response.text();
+      if (text.trim() !== "") {
+        return text;
+      }
+    }
+  } catch {
+    // ignore parse errors and fall back to generic message
+  }
+
+  return `API request failed: ${response.status}`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
 
@@ -43,7 +65,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!response.ok) {
-    throw new Error(`API request failed: ${response.status}`);
+    throw new Error(await readErrorMessage(response));
   }
 
   return response.json() as Promise<T>;
@@ -59,7 +81,7 @@ async function requestBlob(path: string, init?: RequestInit): Promise<Blob> {
   }
 
   if (!response.ok) {
-    throw new Error(`API request failed: ${response.status}`);
+    throw new Error(await readErrorMessage(response));
   }
 
   return response.blob();

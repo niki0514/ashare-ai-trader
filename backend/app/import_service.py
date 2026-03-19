@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from .models import ImportBatchStatus
 from .repositories import OrderRepository, PortfolioRepository
-from .schemas import ImportPreviewRow
 
 
 class ImportService:
@@ -65,10 +65,12 @@ class ImportService:
             "rows": checked_rows,
         }
 
-    def commit_import_batch(self, batch_id: str, mode: str) -> dict:
+    def commit_import_batch(self, user_id: str, batch_id: str, mode: str) -> dict:
         batch = self.order_repo.get_import_batch(batch_id)
-        if not batch:
+        if not batch or batch.user_id != user_id:
             raise ValueError("Import batch not found")
+        if batch.status == ImportBatchStatus.COMMITTED:
+            raise ValueError("Import batch already committed")
         imported = self.order_repo.commit_import_batch(batch, mode)
         return {
             "batchId": batch.id,

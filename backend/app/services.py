@@ -683,7 +683,20 @@ class QueryService:
 
     def get_calendar(self, user_id: str) -> list[dict]:
         rows = self.pnl_repo.list_calendar_rows(user_id)
-        return [{"date": r.trade_date, "dailyPnl": r.daily_pnl, "dailyReturn": r.daily_return, "tradeCount": r.trade_count} for r in rows]
+        today = market_clock.now().date().isoformat()
+        result: list[dict] = []
+        for row in rows:
+            if row.trade_date == today and not row.is_final:
+                continue
+            result.append(
+                {
+                    "date": row.trade_date,
+                    "dailyPnl": row.daily_pnl,
+                    "dailyReturn": row.daily_return,
+                    "tradeCount": row.trade_count,
+                }
+            )
+        return result
 
     def get_daily_detail(self, user_id: str, date: str) -> list[dict]:
         rows = self.pnl_repo.list_detail_rows(user_id, date)

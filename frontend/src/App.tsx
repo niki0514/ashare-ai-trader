@@ -9,9 +9,15 @@ import type {
   PendingOrderRow,
   ImportPreviewResponse,
   ImportPreviewRow,
-  PositionRow
+  PositionRow,
 } from "./types";
-import { formatCurrency, formatNumber, formatPercent, orderStatusLabel, statusLabel } from "./utils";
+import {
+  formatCurrency,
+  formatNumber,
+  formatPercent,
+  orderStatusLabel,
+  statusLabel,
+} from "./utils";
 
 type TabKey = "positions" | "history" | "pnl" | "import";
 
@@ -19,7 +25,7 @@ const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "positions", label: "持仓明细" },
   { key: "history", label: "历史流水" },
   { key: "pnl", label: "每日收益" },
-  { key: "import", label: "数据导入" }
+  { key: "import", label: "操作导入" },
 ];
 
 const WEEKDAY_LABELS = ["一", "二", "三", "四", "五", "六", "日"];
@@ -30,23 +36,64 @@ type ManualInputRow = ManualImportRowInput & {
 
 const MANUAL_SIDE_OPTIONS: Array<{ value: ManualImportRowInput["side"]; label: string }> = [
   { value: "BUY", label: "买入" },
-  { value: "SELL", label: "卖出" }
+  { value: "SELL", label: "卖出" },
 ];
 
 const MANUAL_VALIDITY_OPTIONS: Array<{ value: ManualImportRowInput["validity"]; label: string }> = [
   { value: "DAY", label: "当日有效" },
-  { value: "GTC", label: "持续有效" }
+  { value: "GTC", label: "持续有效" },
 ];
 
-function createManualInputRow(): ManualInputRow {
+function createManualInputRow(seed: Partial<ManualImportRowInput> = {}): ManualInputRow {
   return {
-    id: typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
-    symbol: "",
-    side: "BUY",
-    price: 0,
-    lots: 1,
-    validity: "DAY"
+    id:
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random()}`,
+    symbol: seed.symbol ?? "",
+    side: seed.side ?? "BUY",
+    price: seed.price ?? 0,
+    lots: seed.lots ?? 1,
+    validity: seed.validity ?? "DAY",
   };
+}
+
+function createManualRowsFromPreview(rows: ImportPreviewRow[]): ManualInputRow[] {
+  if (rows.length === 0) {
+    return [createManualInputRow()];
+  }
+
+  return rows.map((row) =>
+    createManualInputRow({
+      symbol: row.symbol,
+      side: row.side,
+      price: row.price,
+      lots: row.lots,
+      validity: row.validity,
+    }),
+  );
+}
+
+function isManualRowTouched(row: ManualInputRow) {
+  return (
+    row.symbol.trim() !== "" ||
+    Number(row.price) !== 0 ||
+    Number(row.lots) !== 1 ||
+    row.side !== "BUY" ||
+    row.validity !== "DAY"
+  );
+}
+
+function isManualRowComplete(row: ManualInputRow) {
+  return row.symbol.trim() !== "" && Number(row.price) > 0 && Number(row.lots) > 0;
+}
+
+function tradeSideLabel(side: "BUY" | "SELL") {
+  return side === "BUY" ? "买入" : "卖出";
+}
+
+function tradeDateOf(value: string) {
+  return value.slice(0, 10);
 }
 
 function monthKeyFromDate(value: string) {
@@ -61,7 +108,7 @@ function monthLabel(monthKey: string) {
 function shiftMonthKey(monthKey: string, offset: number) {
   const [year, month] = monthKey.split("-").map(Number);
   return `${new Date(year, month - 1 + offset, 1).getFullYear()}-${String(
-    new Date(year, month - 1 + offset, 1).getMonth() + 1
+    new Date(year, month - 1 + offset, 1).getMonth() + 1,
   ).padStart(2, "0")}`;
 }
 
@@ -97,7 +144,7 @@ function buildMonthCells(monthKey: string, rowsByDate: Map<string, CalendarDay>)
     return {
       date,
       dayNumber,
-      data: rowsByDate.get(date) ?? null
+      data: rowsByDate.get(date) ?? null,
     };
   });
 }
@@ -116,14 +163,15 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string>("");
 
   async function loadCoreData(currentSelectedDate: string) {
-    const [dashboardRes, positionsRes, pendingOrdersRes, historyRes, calendarRes, dailyRes] = await Promise.all([
-      api.getDashboard(),
-      api.getPositions(),
-      api.getPendingOrders(),
-      api.getHistory(),
-      api.getCalendar(),
-      api.getDailyPnlDetail(currentSelectedDate)
-    ]);
+    const [dashboardRes, positionsRes, pendingOrdersRes, historyRes, calendarRes, dailyRes] =
+      await Promise.all([
+        api.getDashboard(),
+        api.getPositions(),
+        api.getPendingOrders(),
+        api.getHistory(),
+        api.getCalendar(),
+        api.getDailyPnlDetail(currentSelectedDate),
+      ]);
 
     setDashboard(dashboardRes);
     setPositions(positionsRes.rows);
@@ -164,6 +212,16 @@ export default function App() {
   }, [selectedDate]);
 
   useEffect(() => {
+    if (calendar.length === 0) {
+      return;
+    }
+
+    if (!calendar.some((row) => row.date === selectedDate)) {
+      setSelectedDate(calendar[calendar.length - 1].date);
+    }
+  }, [calendar, selectedDate]);
+
+  useEffect(() => {
     if (!dashboard) {
       return;
     }
@@ -191,16 +249,29 @@ export default function App() {
           <span>最新更新 {new Date(dashboard.updatedAt).toLocaleTimeString("zh-CN")}</span>
         </div>
         <div className="meta-cluster meta-cluster-right">
-          <span className={`status-pill market-${dashboard.marketStatus}`}>{statusLabel(dashboard.marketStatus)}</span>
+          <span className={`status-pill market-${dashboard.marketStatus}`}>
+            {statusLabel(dashboard.marketStatus)}
+          </span>
         </div>
       </header>
 
       <section className="metric-grid">
         <MetricCard label="总资产" value={formatCurrency(dashboard.metrics.totalAssets)} />
         <MetricCard label="可用现金" value={formatCurrency(dashboard.metrics.availableCash)} />
-        <MetricCard label="持仓市值" value={formatCurrency(dashboard.metrics.positionMarketValue)} />
-        <MetricCard label="当日收益" value={formatCurrency(dashboard.metrics.dailyPnl)} accent={dashboard.metrics.dailyPnl} />
-        <MetricCard label="累计收益" value={formatCurrency(dashboard.metrics.cumulativePnl)} accent={dashboard.metrics.cumulativePnl} />
+        <MetricCard
+          label="持仓市值"
+          value={formatCurrency(dashboard.metrics.positionMarketValue)}
+        />
+        <MetricCard
+          label="当日收益"
+          value={formatCurrency(dashboard.metrics.dailyPnl)}
+          accent={dashboard.metrics.dailyPnl}
+        />
+        <MetricCard
+          label="累计收益"
+          value={formatCurrency(dashboard.metrics.cumulativePnl)}
+          accent={dashboard.metrics.cumulativePnl}
+        />
         <MetricCard label="仓位比例" value={formatPercent(dashboard.metrics.exposureRatio)} />
       </section>
 
@@ -219,9 +290,23 @@ export default function App() {
 
       <main className="panel-shell">
         {activeTab === "positions" && <PositionsTab rows={positions} />}
-        {activeTab === "history" && <HistoryTab rows={history} />}
+        {activeTab === "history" && (
+          <HistoryTab
+            rows={history}
+            extraDates={[
+              ...calendar.map((row) => row.date),
+              ...(dashboard.marketStatus === "weekend" ? [] : [dashboard.tradeDate]),
+            ]}
+          />
+        )}
         {activeTab === "pnl" && (
-          <PnlTab rows={calendar} selectedDate={selectedDate} onSelectDate={setSelectedDate} details={dailyDetail} trades={history} />
+          <PnlTab
+            rows={calendar}
+            selectedDate={selectedDate}
+            onSelectDate={setSelectedDate}
+            details={dailyDetail}
+            trades={history}
+          />
         )}
         {activeTab === "import" && (
           <ImportTab
@@ -229,8 +314,9 @@ export default function App() {
             targetTradeDate={nextTradingDate(dashboard.tradeDate)}
             previewRows={previewRows}
             onPreviewUpdate={(response) => {
-              setPreviewRows(response.rows);
+              setPreviewRows(response?.rows ?? []);
             }}
+            onImportCommitted={() => loadCoreData(selectedDate)}
           />
         )}
       </main>
@@ -253,36 +339,61 @@ function PositionsTab({ rows }: { rows: PositionRow[] }) {
   return (
     <section className="positions-layout">
       <DataTable
-        headers={["股票代码", "名称", "持仓数量", "可卖数量", "卖出冻结数量", "成本价", "现价", "市值", "今日盈亏", "今日盈亏比例", "浮盈亏", "收益率"]}
+        headers={[
+          "股票代码",
+          "名称",
+          "持仓数量",
+          "可卖数量",
+          "卖出冻结数量",
+          "成本价",
+          "现价",
+          "市值",
+          "今日盈亏",
+          "今日盈亏比例",
+          "浮盈亏",
+          "收益率",
+        ]}
         rows={
           rows.length > 0
             ? rows.map((row) => (
-              <tr key={row.symbol}>
-                <td>{row.symbol}</td>
-                <td>{row.name}</td>
-              <td>{formatNumber(row.shares)}</td>
-              <td>{formatNumber(row.sellableShares)}</td>
-              <td>{formatNumber(row.frozenSellShares)}</td>
-              <td>{row.costPrice.toFixed(3)}</td>
-              <td>{row.lastPrice.toFixed(2)}</td>
-              <td>{formatCurrency(row.marketValue)}</td>
-                <td className={row.todayPnl >= 0 ? "up" : "down"}>{formatCurrency(row.todayPnl)}</td>
-                <td className={row.todayReturn >= 0 ? "up" : "down"}>{formatPercent(row.todayReturn)}</td>
-                <td className={row.pnl >= 0 ? "up" : "down"}>{formatCurrency(row.pnl)}</td>
-                <td className={row.returnRate >= 0 ? "up" : "down"}>{formatPercent(row.returnRate)}</td>
-              </tr>
-            ))
+                <tr key={row.symbol}>
+                  <td>{row.symbol}</td>
+                  <td>{row.name}</td>
+                  <td>{formatNumber(row.shares)}</td>
+                  <td>{formatNumber(row.sellableShares)}</td>
+                  <td>{formatNumber(row.frozenSellShares)}</td>
+                  <td>{row.costPrice.toFixed(3)}</td>
+                  <td>{row.lastPrice.toFixed(2)}</td>
+                  <td>{formatCurrency(row.marketValue)}</td>
+                  <td className={row.todayPnl >= 0 ? "up" : "down"}>
+                    {formatCurrency(row.todayPnl)}
+                  </td>
+                  <td className={row.todayReturn >= 0 ? "up" : "down"}>
+                    {formatPercent(row.todayReturn)}
+                  </td>
+                  <td className={row.pnl >= 0 ? "up" : "down"}>{formatCurrency(row.pnl)}</td>
+                  <td className={row.returnRate >= 0 ? "up" : "down"}>
+                    {formatPercent(row.returnRate)}
+                  </td>
+                </tr>
+              ))
             : [
                 <tr key="empty-positions">
-                  <td colSpan={12} className="empty-state">当前无持仓</td>
-                </tr>
+                  <td colSpan={12} className="empty-state">
+                    当前无持仓
+                  </td>
+                </tr>,
               ]
         }
       />
 
       <div className="section-head compact">
         <h3>挂单明细</h3>
-        <span>{rowsWithPendingOrders.length > 0 ? `涉及 ${formatNumber(rowsWithPendingOrders.length)} 只持仓` : "当前无卖出挂单"}</span>
+        <span>
+          {rowsWithPendingOrders.length > 0
+            ? `涉及 ${formatNumber(rowsWithPendingOrders.length)} 只持仓`
+            : "当前无卖出挂单"}
+        </span>
       </div>
       <div className="pending-sections">
         {rowsWithPendingOrders.length > 0 ? (
@@ -322,24 +433,279 @@ function PositionsTab({ rows }: { rows: PositionRow[] }) {
   );
 }
 
-function HistoryTab({ rows }: { rows: HistoryRow[] }) {
+function HistoryTab({ rows, extraDates }: { rows: HistoryRow[]; extraDates: string[] }) {
+  const historyDates = useMemo(
+    () => Array.from(new Set(rows.map((row) => tradeDateOf(row.time)))).sort(),
+    [rows],
+  );
+  const availableDates = useMemo(
+    () => Array.from(new Set([...historyDates, ...extraDates].filter(Boolean))).sort(),
+    [extraDates, historyDates],
+  );
+  const earliestDate = availableDates[0] ?? "";
+  const latestDate = availableDates[availableDates.length - 1] ?? "";
+  const latestHistoryDate = historyDates[historyDates.length - 1] ?? latestDate;
+  const [filterMode, setFilterMode] = useState<"single" | "range">("range");
+  const [singleDate, setSingleDate] = useState("");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+
+  useEffect(() => {
+    if (availableDates.length === 0) {
+      setSingleDate("");
+      setStartDate("");
+      setEndDate("");
+      return;
+    }
+
+    setSingleDate((current) =>
+      current !== "" && current >= earliestDate && current <= latestDate
+        ? current
+        : latestHistoryDate,
+    );
+    setStartDate((current) =>
+      current !== "" && current >= earliestDate && current <= latestDate ? current : earliestDate,
+    );
+    setEndDate((current) =>
+      current !== "" && current >= earliestDate && current <= latestDate ? current : latestDate,
+    );
+  }, [availableDates.length, earliestDate, latestDate, latestHistoryDate]);
+
+  const normalizedSingleDate = singleDate || latestHistoryDate;
+  const rangeStartCandidate = startDate || earliestDate;
+  const rangeEndCandidate = endDate || latestDate;
+  const [normalizedStartDate, normalizedEndDate] =
+    rangeStartCandidate <= rangeEndCandidate
+      ? [rangeStartCandidate, rangeEndCandidate]
+      : [rangeEndCandidate, rangeStartCandidate];
+
+  const filteredRows = useMemo(
+    () =>
+      rows.filter((row) => {
+        const tradeDate = tradeDateOf(row.time);
+
+        if (filterMode === "single") {
+          return normalizedSingleDate === "" || tradeDate === normalizedSingleDate;
+        }
+
+        return (
+          (normalizedStartDate === "" || tradeDate >= normalizedStartDate) &&
+          (normalizedEndDate === "" || tradeDate <= normalizedEndDate)
+        );
+      }),
+    [filterMode, normalizedEndDate, normalizedSingleDate, normalizedStartDate, rows],
+  );
+
+  const visibleTradeDays = useMemo(
+    () => new Set(filteredRows.map((row) => tradeDateOf(row.time))).size,
+    [filteredRows],
+  );
+  const totalTurnover = useMemo(
+    () => filteredRows.reduce((sum, row) => sum + (row.fillPrice ?? 0) * row.shares, 0),
+    [filteredRows],
+  );
+  const filterRangeLabel =
+    filterMode === "single"
+      ? normalizedSingleDate || "全部交易日"
+      : normalizedStartDate === normalizedEndDate
+        ? normalizedStartDate || "全部交易日"
+        : `${normalizedStartDate || earliestDate} 至 ${normalizedEndDate || latestDate}`;
+
+  function resetHistoryFilters() {
+    setFilterMode("range");
+    setSingleDate(latestHistoryDate);
+    setStartDate(earliestDate);
+    setEndDate(latestDate);
+  }
+
+  function handleStartDateChange(nextValue: string) {
+    setStartDate(nextValue);
+    setEndDate((current) => {
+      if (nextValue === "") {
+        return current;
+      }
+
+      if (current === "" || current < nextValue) {
+        return nextValue;
+      }
+
+      return current;
+    });
+  }
+
+  function handleEndDateChange(nextValue: string) {
+    setEndDate(nextValue);
+    setStartDate((current) => {
+      if (nextValue === "") {
+        return current;
+      }
+
+      if (current === "" || current > nextValue) {
+        return nextValue;
+      }
+
+      return current;
+    });
+  }
+
   return (
-    <section>
-      <DataTable
-        headers={["成交时间", "股票代码", "名称", "方向", "委托价", "成交价", "手数", "股数"]}
-        rows={rows.map((row) => (
-          <tr key={row.id}>
-             <td>{row.time}</td>
-            <td>{row.symbol}</td>
-            <td>{row.name}</td>
-            <td>{row.side}</td>
-            <td>{row.orderPrice.toFixed(2)}</td>
-            <td>{row.fillPrice?.toFixed(2) ?? "-"}</td>
-            <td>{row.lots}</td>
-            <td>{formatNumber(row.shares)}</td>
-          </tr>
-        ))}
-      />
+    <section className="history-layout">
+      <div className="history-toolbar">
+        <div className="history-filter-group">
+          <span className="history-toolbar-label">交易日筛选</span>
+          <div className="history-mode-switch" role="tablist" aria-label="历史流水筛选方式">
+            <button
+              type="button"
+              className={
+                filterMode === "single" ? "history-mode-button active" : "history-mode-button"
+              }
+              onClick={() => setFilterMode("single")}
+            >
+              单日
+            </button>
+            <button
+              type="button"
+              className={
+                filterMode === "range" ? "history-mode-button active" : "history-mode-button"
+              }
+              onClick={() => setFilterMode("range")}
+            >
+              连续多日
+            </button>
+          </div>
+        </div>
+
+        <div className="history-filter-fields">
+          {filterMode === "single" ? (
+            <label className="history-filter-field">
+              <span>交易日</span>
+              <input
+                type="date"
+                value={singleDate}
+                min={earliestDate || undefined}
+                max={latestDate || undefined}
+                onChange={(event) => setSingleDate(event.target.value)}
+              />
+            </label>
+          ) : (
+            <>
+              <label className="history-filter-field">
+                <span>起始日</span>
+                <input
+                  type="date"
+                  value={startDate}
+                  min={earliestDate || undefined}
+                  max={latestDate || undefined}
+                  onChange={(event) => handleStartDateChange(event.target.value)}
+                />
+              </label>
+              <label className="history-filter-field">
+                <span>结束日</span>
+                <input
+                  type="date"
+                  value={endDate}
+                  min={earliestDate || undefined}
+                  max={latestDate || undefined}
+                  onChange={(event) => handleEndDateChange(event.target.value)}
+                />
+              </label>
+            </>
+          )}
+          <button type="button" className="history-reset-button" onClick={resetHistoryFilters}>
+            重置
+          </button>
+        </div>
+
+        <div className="history-toolbar-meta">
+          <span>{filterRangeLabel}</span>
+          <span>{formatNumber(visibleTradeDays)} 个交易日</span>
+          <span>{formatNumber(filteredRows.length)} 笔成交</span>
+          <strong>{formatCurrency(totalTurnover)}</strong>
+        </div>
+      </div>
+
+      <div className="table-wrap history-table-wrap">
+        <table className="history-table">
+          <colgroup>
+            <col className="history-col-time" />
+            <col className="history-col-security" />
+            <col className="history-col-side" />
+            <col className="history-col-order" />
+            <col className="history-col-fill" />
+            <col className="history-col-turnover" />
+            <col className="history-col-lots" />
+            <col className="history-col-shares" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th>成交时间</th>
+              <th>证券</th>
+              <th>方向</th>
+              <th className="align-right">委托价</th>
+              <th className="align-right">成交价</th>
+              <th className="align-right">成交额</th>
+              <th className="align-right">手数</th>
+              <th className="align-right">股数</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredRows.length > 0 ? (
+              filteredRows.map((row) => {
+                const turnover = row.fillPrice === undefined ? null : row.fillPrice * row.shares;
+
+                return (
+                  <tr key={row.id}>
+                    <td>
+                      <div className="history-time-cell">
+                        <strong>{row.time.slice(11, 19)}</strong>
+                        <span>{tradeDateOf(row.time)}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="history-security-cell">
+                        <strong>{row.symbol}</strong>
+                        <span>{row.name}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <span
+                        className={
+                          row.side === "BUY"
+                            ? "trade-side-pill trade-side-buy"
+                            : "trade-side-pill trade-side-sell"
+                        }
+                      >
+                        {tradeSideLabel(row.side)}
+                      </span>
+                    </td>
+                    <td className="number-cell">{row.orderPrice.toFixed(2)}</td>
+                    <td className="number-cell">{row.fillPrice?.toFixed(2) ?? "-"}</td>
+                    <td
+                      className={
+                        turnover === null
+                          ? "number-cell"
+                          : row.side === "BUY"
+                            ? "number-cell up"
+                            : "number-cell down"
+                      }
+                    >
+                      {turnover === null ? "-" : formatCurrency(turnover)}
+                    </td>
+                    <td className="number-cell">{formatNumber(row.lots)}</td>
+                    <td className="number-cell">{formatNumber(row.shares)}</td>
+                  </tr>
+                );
+              })
+            ) : (
+              <tr>
+                <td colSpan={8} className="empty-state">
+                  {rows.length > 0 ? "无成交记录" : "当前无历史流水"}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }
@@ -349,7 +715,7 @@ function PnlTab({
   selectedDate,
   onSelectDate,
   details,
-  trades
+  trades,
 }: {
   rows: CalendarDay[];
   selectedDate: string;
@@ -360,7 +726,7 @@ function PnlTab({
   const rowsByDate = useMemo(() => new Map(rows.map((row) => [row.date, row])), [rows]);
   const availableMonths = useMemo(
     () => Array.from(new Set(rows.map((row) => monthKeyFromDate(row.date)))).sort(),
-    [rows]
+    [rows],
   );
   const [visibleMonth, setVisibleMonth] = useState(() => monthKeyFromDate(selectedDate));
 
@@ -378,16 +744,23 @@ function PnlTab({
     }
 
     if (!availableMonths.includes(visibleMonth)) {
-      setVisibleMonth(availableMonths.includes(monthKeyFromDate(selectedDate)) ? monthKeyFromDate(selectedDate) : availableMonths[0]);
+      setVisibleMonth(
+        availableMonths.includes(monthKeyFromDate(selectedDate))
+          ? monthKeyFromDate(selectedDate)
+          : availableMonths[0],
+      );
     }
   }, [availableMonths, selectedDate, visibleMonth]);
 
-  const monthCells = useMemo(() => buildMonthCells(visibleMonth, rowsByDate), [rowsByDate, visibleMonth]);
+  const monthCells = useMemo(
+    () => buildMonthCells(visibleMonth, rowsByDate),
+    [rowsByDate, visibleMonth],
+  );
   const selectedRow = rowsByDate.get(selectedDate) ?? null;
   const visibleMonthIndex = availableMonths.indexOf(visibleMonth);
   const dayTrades = useMemo(
     () => trades.filter((t) => t.time.startsWith(selectedDate)),
-    [trades, selectedDate]
+    [trades, selectedDate],
   );
 
   function changeMonth(offset: -1 | 1) {
@@ -402,6 +775,16 @@ function PnlTab({
         onSelectDate(nextRow.date);
       }
     }
+  }
+
+  if (rows.length === 0) {
+    return (
+      <section className="calendar-layout">
+        <div className="daily-detail-panel">
+          <div className="daily-detail-empty">暂无已收盘收益数据</div>
+        </div>
+      </section>
+    );
   }
 
   return (
@@ -427,7 +810,9 @@ function PnlTab({
                 type="button"
                 className="calendar-nav-button"
                 onClick={() => changeMonth(1)}
-                disabled={availableMonths.length > 0 && visibleMonthIndex >= availableMonths.length - 1}
+                disabled={
+                  availableMonths.length > 0 && visibleMonthIndex >= availableMonths.length - 1
+                }
                 aria-label="下个月"
               >
                 →
@@ -442,11 +827,31 @@ function PnlTab({
           <div className="calendar-grid compact-calendar-grid">
             {monthCells.map((cell, index) => {
               if (!cell) {
-                return <div key={`blank-${visibleMonth}-${index}`} className="calendar-cell calendar-cell-blank compact-calendar-cell" aria-hidden="true" />;
+                return (
+                  <div
+                    key={`blank-${visibleMonth}-${index}`}
+                    className="calendar-cell calendar-cell-blank compact-calendar-cell"
+                    aria-hidden="true"
+                  />
+                );
               }
 
               const isSelected = selectedDate === cell.date;
-              const isActive = Boolean(cell.data);
+              const hasMetrics = Boolean(cell.data);
+
+              if (!cell.data) {
+                return (
+                  <div
+                    key={cell.date}
+                    className="calendar-cell compact-calendar-cell calendar-cell-blank"
+                    aria-hidden="true"
+                  >
+                    <div className="day-card-head compact-day-card-head">
+                      <strong>{cell.dayNumber}</strong>
+                    </div>
+                  </div>
+                );
+              }
 
               return (
                 <button
@@ -456,24 +861,24 @@ function PnlTab({
                     "day-card",
                     "compact-day-card",
                     isSelected ? "selected" : "",
-                    isActive ? "" : "is-empty"
-                  ].filter(Boolean).join(" ")}
+                    hasMetrics ? "" : "is-empty",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
                   onClick={() => onSelectDate(cell.date)}
                 >
                   <div className="day-card-head compact-day-card-head">
                     <strong>{cell.dayNumber}</strong>
-                    {cell.data ? <span>{formatNumber(cell.data.tradeCount)} 笔</span> : <span>休市</span>}
+                    <span>{formatNumber(cell.data.tradeCount)} 笔</span>
                   </div>
-                  {cell.data ? (
-                    <div className="compact-day-card-body">
-                      <strong className={cell.data.dailyPnl >= 0 ? "up" : "down"}>{formatCurrency(cell.data.dailyPnl)}</strong>
-                      <small className={cell.data.dailyReturn >= 0 ? "up" : "down"}>{formatPercent(cell.data.dailyReturn)}</small>
-                    </div>
-                  ) : (
-                    <div className="day-card-empty compact-day-card-empty">
-                      <small>暂无数据</small>
-                    </div>
-                  )}
+                  <div className="compact-day-card-body">
+                    <strong className={cell.data.dailyPnl >= 0 ? "up" : "down"}>
+                      {formatCurrency(cell.data.dailyPnl)}
+                    </strong>
+                    <small className={cell.data.dailyReturn >= 0 ? "up" : "down"}>
+                      {formatPercent(cell.data.dailyReturn)}
+                    </small>
+                  </div>
                 </button>
               );
             })}
@@ -525,8 +930,12 @@ function PnlTab({
                   <div key={row.symbol} className="daily-detail-row pnl-simple-row">
                     <span className="detail-cell detail-cell-symbol">{row.symbol}</span>
                     <span className="detail-cell detail-cell-name">{row.name}</span>
-                    <span className={`detail-cell ${row.dailyPnl >= 0 ? "up" : "down"}`}>{formatCurrency(row.dailyPnl)}</span>
-                    <span className={`detail-cell ${row.dailyReturn >= 0 ? "up" : "down"}`}>{formatPercent(row.dailyReturn)}</span>
+                    <span className={`detail-cell ${row.dailyPnl >= 0 ? "up" : "down"}`}>
+                      {formatCurrency(row.dailyPnl)}
+                    </span>
+                    <span className={`detail-cell ${row.dailyReturn >= 0 ? "up" : "down"}`}>
+                      {formatPercent(row.dailyReturn)}
+                    </span>
                   </div>
                 ))
               ) : (
@@ -554,7 +963,9 @@ function PnlTab({
                       <span className="detail-cell">{t.time.slice(11, 19)}</span>
                       <span className="detail-cell detail-cell-symbol">{t.symbol}</span>
                       <span className="detail-cell detail-cell-name">{t.name}</span>
-                      <span className={`detail-cell ${t.side === "BUY" ? "up" : "down"}`}>{t.side === "BUY" ? "买入" : "卖出"}</span>
+                      <span className={`detail-cell ${t.side === "BUY" ? "up" : "down"}`}>
+                        {t.side === "BUY" ? "买入" : "卖出"}
+                      </span>
                       <span className="detail-cell">{t.orderPrice.toFixed(2)}</span>
                       <span className="detail-cell">{t.fillPrice?.toFixed(2) ?? "-"}</span>
                       <span className="detail-cell">{formatNumber(t.shares)}</span>
@@ -576,38 +987,124 @@ function ImportTab({
   marketStatus,
   targetTradeDate,
   previewRows,
-  onPreviewUpdate
+  onPreviewUpdate,
+  onImportCommitted,
 }: {
   marketStatus: MarketStatus;
   targetTradeDate: string;
   previewRows: ImportPreviewRow[];
-  onPreviewUpdate: (response: ImportPreviewResponse) => void;
+  onPreviewUpdate: (response: ImportPreviewResponse | null) => void;
+  onImportCommitted: () => Promise<unknown> | unknown;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [downloadingTemplate, setDownloadingTemplate] = useState(false);
-  const [manualSubmitting, setManualSubmitting] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [submittingImport, setSubmittingImport] = useState(false);
+  const [draftBatchId, setDraftBatchId] = useState<string | null>(null);
+  const [draftSavedAt, setDraftSavedAt] = useState<string>("");
+  const [importFeedback, setImportFeedback] = useState<{
+    tone: "success" | "error";
+    text: string;
+  } | null>(null);
+  const [isDraftDirty, setIsDraftDirty] = useState(false);
   const [manualRows, setManualRows] = useState<ManualInputRow[]>([createManualInputRow()]);
   const isImportWindowOpen = marketStatus === "pre_open" || marketStatus === "closed";
 
-  const hasManualInput = manualRows.some((row) => {
-    return row.symbol.trim() !== "" || row.price > 0 || row.lots > 0;
-  });
+  const touchedManualRows = useMemo(() => manualRows.filter(isManualRowTouched), [manualRows]);
+  const hasIncompleteManualRows = touchedManualRows.some((row) => !isManualRowComplete(row));
+  const hasPendingChanges = isDraftDirty && (touchedManualRows.length > 0 || selectedFile !== null);
+  const normalizedManualRows = touchedManualRows.map((row) => ({
+    symbol: row.symbol.trim().toUpperCase(),
+    side: row.side,
+    price: Number(row.price),
+    lots: Number(row.lots),
+    validity: row.validity,
+  }));
+  const canSaveManualDraft = normalizedManualRows.length > 0 && !hasIncompleteManualRows;
+  const canSubmitImport =
+    draftBatchId !== null &&
+    !hasPendingChanges &&
+    !hasIncompleteManualRows &&
+    previewRows.length > 0;
 
-  function guardImportWindow() {
-    return isImportWindowOpen;
+  const statusText = importFeedback?.text
+    ? importFeedback.text
+    : hasIncompleteManualRows
+      ? "请补全未完成行"
+      : hasPendingChanges
+        ? "内容已修改"
+        : draftSavedAt
+          ? `草稿已保存 ${draftSavedAt}`
+          : "未保存草稿";
+
+  function clearDraftPreview() {
+    setDraftBatchId(null);
+    setDraftSavedAt("");
+    onPreviewUpdate(null);
   }
 
-  function updateManualRow<K extends keyof ManualImportRowInput>(id: string, key: K, value: ManualImportRowInput[K]) {
-    setManualRows((currentRows) => currentRows.map((row) => (row.id === id ? { ...row, [key]: value } : row)));
+  function markDraftDirty() {
+    setIsDraftDirty(true);
+    setImportFeedback(null);
+    clearDraftPreview();
   }
 
-  function addManualRow() {
-    setManualRows((currentRows) => [...currentRows, createManualInputRow()]);
+  function applyDraftSaved(response: ImportPreviewResponse, nextRows?: ManualInputRow[]) {
+    onPreviewUpdate(response);
+    if (nextRows) {
+      setManualRows(nextRows);
+    }
+    setDraftBatchId(response.batchId);
+    setDraftSavedAt(
+      new Date().toLocaleTimeString("zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      }),
+    );
+    setIsDraftDirty(false);
+    setImportFeedback({ tone: "success", text: "草稿已保存" });
+  }
+
+  function updateManualRow<K extends keyof ManualImportRowInput>(
+    id: string,
+    key: K,
+    value: ManualImportRowInput[K],
+  ) {
+    markDraftDirty();
+    setManualRows((currentRows) =>
+      currentRows.map((row) => (row.id === id ? { ...row, [key]: value } : row)),
+    );
+  }
+
+  function addManualRow(afterId?: string) {
+    markDraftDirty();
+    setManualRows((currentRows) => {
+      const nextRow = createManualInputRow();
+
+      if (!afterId) {
+        return [...currentRows, nextRow];
+      }
+
+      const insertIndex = currentRows.findIndex((row) => row.id === afterId);
+
+      if (insertIndex < 0) {
+        return [...currentRows, nextRow];
+      }
+
+      return [
+        ...currentRows.slice(0, insertIndex + 1),
+        nextRow,
+        ...currentRows.slice(insertIndex + 1),
+      ];
+    });
   }
 
   function removeManualRow(id: string) {
+    markDraftDirty();
     setManualRows((currentRows) => {
       if (currentRows.length === 1) {
         return [createManualInputRow()];
@@ -618,81 +1115,83 @@ function ImportTab({
   }
 
   function resetManualRows() {
+    setImportFeedback(null);
+    setIsDraftDirty(false);
+    setSelectedFile(null);
+    clearDraftPreview();
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
     setManualRows([createManualInputRow()]);
   }
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const nextFile = event.target.files?.[0] ?? null;
+    if (!nextFile) {
+      return;
+    }
+    markDraftDirty();
     setSelectedFile(nextFile);
   }
 
   async function handleUpload() {
-    if (!guardImportWindow()) {
-      return;
-    }
-
     if (!selectedFile) {
       return;
     }
 
+    setImportFeedback(null);
     setUploading(true);
 
     try {
       const response = await api.uploadImportFile({
         file: selectedFile,
         targetTradeDate,
-        mode: "DRAFT"
+        mode: "DRAFT",
       });
-      onPreviewUpdate(response);
-    } catch {
+      applyDraftSaved(response, createManualRowsFromPreview(response.rows));
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    } catch (error) {
+      setImportFeedback({
+        tone: "error",
+        text: error instanceof Error ? error.message : "上传失败",
+      });
       return;
     } finally {
       setUploading(false);
     }
   }
 
-  async function handleManualSubmit() {
-    if (!guardImportWindow()) {
+  async function handleSaveDraft() {
+    if (!canSaveManualDraft) {
       return;
     }
 
-    const sanitizedRows = manualRows
-      .map((row) => ({
-        symbol: row.symbol.trim().toUpperCase(),
-        side: row.side,
-        price: Number(row.price),
-        lots: Number(row.lots),
-        validity: row.validity
-      }))
-      .filter((row) => row.symbol !== "" || row.price > 0 || row.lots > 0);
-
-    if (sanitizedRows.length === 0) {
-      return;
-    }
-
-    setManualSubmitting(true);
+    setImportFeedback(null);
+    setSavingDraft(true);
 
     try {
       const response = await api.previewImports({
         targetTradeDate,
         mode: "DRAFT",
         sourceType: "MANUAL",
-        rows: sanitizedRows
+        rows: normalizedManualRows,
       });
 
-      onPreviewUpdate(response);
-    } catch {
+      applyDraftSaved(response);
+    } catch (error) {
+      setImportFeedback({
+        tone: "error",
+        text: error instanceof Error ? error.message : "保存草稿失败",
+      });
       return;
     } finally {
-      setManualSubmitting(false);
+      setSavingDraft(false);
     }
   }
 
   async function handleTemplateDownload() {
-    if (!guardImportWindow()) {
-      return;
-    }
-
     setDownloadingTemplate(true);
 
     try {
@@ -705,10 +1204,42 @@ function ImportTab({
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
-    } catch {
+    } catch (error) {
+      setImportFeedback({
+        tone: "error",
+        text: error instanceof Error ? error.message : "下载模板失败",
+      });
       return;
     } finally {
       setDownloadingTemplate(false);
+    }
+  }
+
+  async function handleImportSubmit() {
+    if (!canSubmitImport || !draftBatchId || !isImportWindowOpen) {
+      return;
+    }
+
+    setImportFeedback(null);
+    setSubmittingImport(true);
+
+    try {
+      const response = await api.commitImports({
+        batchId: draftBatchId,
+        mode: "APPEND",
+      });
+      setDraftBatchId(null);
+      setDraftSavedAt("");
+      setIsDraftDirty(false);
+      setImportFeedback({ tone: "success", text: `已提交 ${response.importedCount} 条` });
+      await onImportCommitted();
+    } catch (error) {
+      setImportFeedback({
+        tone: "error",
+        text: error instanceof Error ? error.message : "提交导入失败",
+      });
+    } finally {
+      setSubmittingImport(false);
     }
   }
 
@@ -728,97 +1259,7 @@ function ImportTab({
       </div>
 
       <article className="input-card import-workflow-card">
-        <div className="import-workflow-block">
-          <div className="input-card-head">
-            <h3>手动输入</h3>
-          </div>
-          <div className="manual-grid-shell">
-            <div className="manual-grid-head">
-              <button type="button" onClick={addManualRow}>新增一行</button>
-            </div>
-            <div className="manual-grid-table" role="table" aria-label="手动导入输入表格">
-              <div className="manual-grid-header" role="row">
-                <span>股票代码</span>
-                <span>方向</span>
-                <span>委托价</span>
-                <span>手数</span>
-                <span>有效期</span>
-                <span>操作</span>
-              </div>
-              <div className="manual-grid-body">
-                {manualRows.map((row, index) => (
-                  <div key={row.id} className="manual-grid-row" role="row">
-                    <label className="manual-field">
-                      <span className="sr-only">第 {index + 1} 行股票代码</span>
-                      <input
-                        value={row.symbol}
-                        onChange={(event) => updateManualRow(row.id, "symbol", event.target.value.toUpperCase())}
-                        placeholder="如 600519"
-                      />
-                    </label>
-                    <label className="manual-field">
-                      <span className="sr-only">第 {index + 1} 行方向</span>
-                      <select value={row.side} onChange={(event) => updateManualRow(row.id, "side", event.target.value as ManualImportRowInput["side"])}>
-                        {MANUAL_SIDE_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="manual-field">
-                      <span className="sr-only">第 {index + 1} 行委托价</span>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={row.price}
-                        onChange={(event) => updateManualRow(row.id, "price", Number(event.target.value))}
-                        placeholder="0.00"
-                      />
-                    </label>
-                    <label className="manual-field">
-                      <span className="sr-only">第 {index + 1} 行手数</span>
-                      <input
-                        type="number"
-                        min="1"
-                        step="1"
-                        value={row.lots}
-                        onChange={(event) => updateManualRow(row.id, "lots", Number(event.target.value))}
-                        placeholder="1"
-                      />
-                    </label>
-                    <label className="manual-field">
-                      <span className="sr-only">第 {index + 1} 行有效期</span>
-                      <select
-                        value={row.validity}
-                        onChange={(event) => updateManualRow(row.id, "validity", event.target.value as ManualImportRowInput["validity"])}
-                      >
-                        {MANUAL_VALIDITY_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <div className="manual-row-actions">
-                      <button type="button" onClick={() => removeManualRow(row.id)} disabled={manualSubmitting}>删除</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-          <div className="button-row">
-            <button type="button" onClick={resetManualRows} disabled={manualSubmitting}>清空输入</button>
-            <button type="button" onClick={() => void handleManualSubmit()} disabled={manualSubmitting || !hasManualInput || !isImportWindowOpen}>
-              {manualSubmitting ? "解析中..." : "提交并解析"}
-            </button>
-          </div>
-        </div>
-
-        <div className="import-workflow-divider" aria-hidden="true" />
-
-        <div className="import-workflow-block">
-          <div className="input-card-head">
-            <h3>Excel 导入</h3>
-          </div>
+        <div className="input-card-head import-toolbar-head">
           <input
             ref={fileInputRef}
             type="file"
@@ -826,46 +1267,229 @@ function ImportTab({
             style={{ display: "none" }}
             onChange={handleFileChange}
           />
-          <div className="validation-note">{selectedFile ? selectedFile.name : ""}</div>
-          <div className="button-row">
-            <button type="button" onClick={() => void handleTemplateDownload()} disabled={uploading || downloadingTemplate || manualSubmitting || !isImportWindowOpen}>
+          <div className="button-row import-toolbar-actions">
+            <button
+              type="button"
+              onClick={() => void handleTemplateDownload()}
+              disabled={uploading || downloadingTemplate || savingDraft || submittingImport}
+            >
               {downloadingTemplate ? "下载中..." : "下载模板"}
             </button>
-            <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploading || downloadingTemplate || !isImportWindowOpen}>选择文件</button>
-            <button type="button" onClick={() => void handleUpload()} disabled={uploading || downloadingTemplate || !selectedFile || !isImportWindowOpen}>
-              {uploading ? "上传中..." : "上传并解析"}
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading || downloadingTemplate || savingDraft || submittingImport}
+            >
+              选择文件
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleUpload()}
+              disabled={
+                uploading || downloadingTemplate || savingDraft || submittingImport || !selectedFile
+              }
+            >
+              {uploading ? "上传中..." : "上传并保存草稿"}
+            </button>
+          </div>
+        </div>
+        <div className="manual-grid-shell">
+          {selectedFile ? <div className="import-file-name">{selectedFile.name}</div> : null}
+          <div className="manual-grid-head">
+            <button
+              type="button"
+              className="manual-row-icon-button manual-add-button"
+              onClick={() => addManualRow()}
+              disabled={savingDraft || uploading || submittingImport}
+              aria-label="新增一行"
+              title="新增一行"
+            >
+              +
+            </button>
+          </div>
+          <div className="manual-grid-layout">
+            <div className="manual-grid-table" role="table" aria-label="导入编辑表格">
+              <div className="manual-grid-header" role="row">
+                <span>股票代码</span>
+                <span>方向</span>
+                <span>委托价</span>
+                <span>手数</span>
+                <span>有效期</span>
+              </div>
+              <div className="manual-grid-body">
+                {manualRows.map((row, index) => (
+                  <div key={row.id} className="manual-grid-body-row" role="row">
+                    <div className="manual-grid-row-fields">
+                      <label className="manual-field">
+                        <span className="sr-only">第 {index + 1} 行股票代码</span>
+                        <input
+                          value={row.symbol}
+                          onChange={(event) =>
+                            updateManualRow(row.id, "symbol", event.target.value.toUpperCase())
+                          }
+                          placeholder="如 600519"
+                        />
+                      </label>
+                      <label className="manual-field">
+                        <span className="sr-only">第 {index + 1} 行方向</span>
+                        <select
+                          value={row.side}
+                          onChange={(event) =>
+                            updateManualRow(
+                              row.id,
+                              "side",
+                              event.target.value as ManualImportRowInput["side"],
+                            )
+                          }
+                        >
+                          {MANUAL_SIDE_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="manual-field">
+                        <span className="sr-only">第 {index + 1} 行委托价</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={row.price}
+                          onChange={(event) =>
+                            updateManualRow(row.id, "price", Number(event.target.value))
+                          }
+                          placeholder="0.00"
+                        />
+                      </label>
+                      <label className="manual-field">
+                        <span className="sr-only">第 {index + 1} 行手数</span>
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={row.lots}
+                          onChange={(event) =>
+                            updateManualRow(row.id, "lots", Number(event.target.value))
+                          }
+                          placeholder="1"
+                        />
+                      </label>
+                      <label className="manual-field">
+                        <span className="sr-only">第 {index + 1} 行有效期</span>
+                        <select
+                          value={row.validity}
+                          onChange={(event) =>
+                            updateManualRow(
+                              row.id,
+                              "validity",
+                              event.target.value as ManualImportRowInput["validity"],
+                            )
+                          }
+                        >
+                          {MANUAL_VALIDITY_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="manual-grid-action-rail" aria-label="删除操作">
+              <div className="manual-grid-action-rail-head" aria-hidden="true" />
+              <div className="manual-grid-action-rail-body">
+                {manualRows.map((row, index) => (
+                  <div key={`${row.id}-action`} className="manual-grid-action-item">
+                    <button
+                      type="button"
+                      className="manual-row-icon-button manual-row-icon-button-danger"
+                      onClick={() => removeManualRow(row.id)}
+                      disabled={savingDraft || uploading || submittingImport}
+                      aria-label={`删除第 ${index + 1} 行`}
+                      title="删除当前行"
+                    >
+                      -
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="import-submit-actions">
+          <div className="import-status-row">
+            <span
+              className={`import-status-note${
+                importFeedback?.tone === "error"
+                  ? " is-error"
+                  : importFeedback?.tone === "success"
+                    ? " is-success"
+                    : ""
+              }`}
+            >
+              {statusText}
+            </span>
+            {!isImportWindowOpen ? (
+              <span className="import-status-note">当前仅可保存草稿</span>
+            ) : null}
+          </div>
+          <div className="button-row footer-actions">
+            <button
+              type="button"
+              onClick={resetManualRows}
+              disabled={savingDraft || uploading || submittingImport}
+            >
+              清空输入
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleSaveDraft()}
+              disabled={savingDraft || uploading || submittingImport || !canSaveManualDraft}
+            >
+              {savingDraft ? "保存中..." : "保存草稿"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleImportSubmit()}
+              disabled={
+                savingDraft ||
+                uploading ||
+                submittingImport ||
+                !canSubmitImport ||
+                !isImportWindowOpen
+              }
+            >
+              {submittingImport ? "提交中..." : "提交导入"}
             </button>
           </div>
         </div>
       </article>
 
-      <DataTable
-        headers={["行号", "股票代码", "方向", "委托价", "手数", "有效期", "校验结果"]}
-        rows={
-          previewRows.length > 0
-            ? previewRows.map((row) => (
-                <tr key={row.rowNumber}>
-                  <td>{row.rowNumber}</td>
-                  <td>{row.symbol}</td>
-                  <td>{row.side}</td>
-                  <td>{row.price.toFixed(2)}</td>
-                  <td>{row.lots}</td>
-                  <td>{row.validity}</td>
-                  <td>
-                    <span className={`status-pill validation-${row.validationStatus.toLowerCase()}`}>
-                      {row.validationStatus}
-                    </span>
-                    <div className="validation-note">{row.validationMessage}</div>
-                  </td>
-                </tr>
-              ))
-            : [
-                <tr key="empty-import-preview">
-                  <td colSpan={7} className="empty-state">提交手动输入或上传文件后，将在这里展示解析预览</td>
-                </tr>
-              ]
-        }
-      />
+      {previewRows.length > 0 ? (
+        <DataTable
+          headers={["行号", "股票代码", "方向", "委托价", "手数", "有效期", "校验结果"]}
+          rows={previewRows.map((row) => (
+            <tr key={row.rowNumber}>
+              <td>{row.rowNumber}</td>
+              <td>{row.symbol}</td>
+              <td>{row.side}</td>
+              <td>{row.price.toFixed(2)}</td>
+              <td>{row.lots}</td>
+              <td>{row.validity}</td>
+              <td>
+                <span className={`status-pill validation-${row.validationStatus.toLowerCase()}`}>
+                  {row.validationStatus}
+                </span>
+                <div className="validation-note">{row.validationMessage}</div>
+              </td>
+            </tr>
+          ))}
+        />
+      ) : null}
     </section>
   );
 }

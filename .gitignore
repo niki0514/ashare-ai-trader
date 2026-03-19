@@ -5,8 +5,4 @@ dist/
 .env
 __pycache__/
 *.pyc
-backend/dev.db
-backend/dev.db-journal
-backend/data/*.db
-backend/data/*.db-*
 backend/.venv/

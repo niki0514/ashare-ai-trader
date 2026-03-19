@@ -499,7 +499,8 @@ class QueryService:
         market_session = market_clock.get_session()
         trade_date = market_session.trade_date
         daily = self.pnl_repo.get_daily_pnl(user_id, trade_date)
-        if market_session.market_status == "trading":
+        use_intraday_quote = market_session.market_status in {"trading", "lunch_break"}
+        if use_intraday_quote:
             self.pnl_service.recompute_daily_pnl(user_id, trade_date, use_realtime=True, is_final=False)
             daily = self.pnl_repo.get_daily_pnl(user_id, trade_date)
         elif not daily:
@@ -512,8 +513,8 @@ class QueryService:
         for lot in open_lots:
             quote = self.market_repo.get_quote(to_quote_symbol(lot.symbol))
             daily_price = self.market_repo.latest_daily_price(lot.symbol, trade_date)
-            if market_session.market_status == "trading":
-                price = quote.price if quote else lot.cost_price
+            if use_intraday_quote:
+                price = quote.price if quote else (daily_price.close_price if daily_price else lot.cost_price)
             else:
                 price = daily_price.close_price if daily_price else (quote.price if quote else lot.cost_price)
             position_market_value += lot.remaining_shares * price
@@ -571,14 +572,15 @@ class QueryService:
             current["sellableShares"] += lot.sellable_shares
 
         rows: list[dict] = []
+        use_intraday_quote = market_session.market_status in {"trading", "lunch_break"}
         for symbol, row in grouped.items():
             pending = pending_sell.get(symbol, [])
             frozen = sum(o.shares for o in pending)
             display_sellable = max(0, row["sellableShares"] - frozen)
             quote = self.market_repo.get_quote(to_quote_symbol(symbol))
             daily_price = self.market_repo.latest_daily_price(symbol, trade_date)
-            if market_session.market_status == "trading":
-                quote_price = quote.price if quote else row["lastPrice"]
+            if use_intraday_quote:
+                quote_price = quote.price if quote else (daily_price.close_price if daily_price else row["lastPrice"])
                 previous_close = quote.previous_close if quote else previous_close_by_symbol.get(symbol, row["costPrice"])
             else:
                 quote_price = daily_price.close_price if daily_price else (quote.price if quote else row["lastPrice"])
@@ -940,6 +942,10 @@ class TradingService:
             processed = await self._process_orders(user_id, session_info.trade_date)
             self.pnl_service.recompute_daily_pnl(user_id, session_info.trade_date, use_realtime=True, is_final=False)
             return processed
+
+        if session_info.market_status == "lunch_break":
+            self.pnl_service.recompute_daily_pnl(user_id, session_info.trade_date, use_realtime=True, is_final=False)
+            return 0
 
         if session_info.market_status == "closed":
             self._settle_close(user_id, session_info.trade_date)

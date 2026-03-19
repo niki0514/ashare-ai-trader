@@ -611,33 +611,46 @@ tbody tr:hover,
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
   padding-bottom: 10px;
   border-bottom: 1px solid rgba(16, 32, 51, 0.08);
 }
 
-.daily-detail-header h3 {
-  margin: 2px 0 0;
-  font-size: 20px;
+.daily-detail-title-block {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
 }
 
-.detail-kicker {
+.daily-detail-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.daily-detail-header h3 {
   margin: 0;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  font-size: 11px;
+  font-size: 20px;
 }
 
 .daily-detail-date-block {
   display: grid;
   justify-items: end;
   gap: 4px;
+  min-width: 120px;
   text-align: right;
 }
 
+.daily-detail-date-label {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .daily-detail-date-block strong {
-  font-size: 16px;
+  font-size: 18px;
   line-height: 1.1;
 }
 

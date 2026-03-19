@@ -252,7 +252,6 @@ function PositionsTab({ rows }: { rows: PositionRow[] }) {
 
   return (
     <section className="positions-layout">
-      <p className="validation-note">口径说明：今日盈亏 = 剩余持仓 ×（现价 - 昨收）；浮盈亏 = 剩余持仓 ×（现价 - 成本价）。</p>
       <DataTable
         headers={["股票代码", "名称", "持仓数量", "可卖数量", "卖出冻结数量", "成本价", "现价", "市值", "今日盈亏", "今日盈亏比例", "浮盈亏", "收益率"]}
         rows={
@@ -482,20 +481,35 @@ function PnlTab({
         </div>
         <article className="daily-detail-panel">
           <div className="daily-detail-header">
-            <div>
-              <p className="detail-kicker">Linked detail</p>
-              <h3>交易日损益明细</h3>
-              <p className="validation-note">本页按账户资产变动口径展示：日历汇总 = 当日明细求和；持仓页“今日盈亏”仅反映剩余持仓对昨收的变动，不等于组合日收益。</p>
+            <div className="daily-detail-title-block">
+              <div className="daily-detail-title-row">
+                <h3>交易日损益明细</h3>
+              </div>
             </div>
             <div className="daily-detail-date-block">
+              <span className="daily-detail-date-label">选中日期</span>
               <strong>{selectedDate}</strong>
-              <span>{selectedRow ? `当日收益 ` : "当前日期暂无日收益汇总"}</span>
-              {selectedRow && (
-                <span className={selectedRow.dailyPnl >= 0 ? "up" : "down"}>
-                  {formatCurrency(selectedRow.dailyPnl)}（{formatPercent(selectedRow.dailyReturn)}）
-                </span>
-              )}
+              <span>{selectedRow ? "组合当日收益" : "当前日期暂无收益汇总"}</span>
             </div>
+          </div>
+
+          <div className="daily-detail-summary-grid">
+            <article className="daily-summary-card">
+              <span>当日收益</span>
+              <strong className={selectedRow ? (selectedRow.dailyPnl < 0 ? "down" : "up") : ""}>
+                {selectedRow ? formatCurrency(selectedRow.dailyPnl) : "--"}
+              </strong>
+            </article>
+            <article className="daily-summary-card">
+              <span>收益率</span>
+              <strong className={selectedRow ? (selectedRow.dailyReturn < 0 ? "down" : "up") : ""}>
+                {selectedRow ? formatPercent(selectedRow.dailyReturn) : "--"}
+              </strong>
+            </article>
+            <article className="daily-summary-card">
+              <span>成交笔数</span>
+              <strong>{formatNumber(dayTrades.length)}</strong>
+            </article>
           </div>
 
           <div className="daily-detail-table-shell">

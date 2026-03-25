@@ -1,13 +1,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .config import settings
 
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def next_trading_date(trade_date: str) -> str:
+    year, month, day = [int(part) for part in trade_date.split("-")]
+    target = datetime(year, month, day, tzinfo=CN_TZ)
+    while True:
+        target += timedelta(days=1)
+        if target.weekday() < 5:
+            return target.strftime("%Y-%m-%d")
+
+
+def previous_trading_date(trade_date: str) -> str:
+    year, month, day = [int(part) for part in trade_date.split("-")]
+    target = datetime(year, month, day, tzinfo=CN_TZ)
+    while True:
+        target -= timedelta(days=1)
+        if target.weekday() < 5:
+            return target.strftime("%Y-%m-%d")
 
 
 @dataclass(slots=True)
@@ -49,7 +67,13 @@ class MarketClock:
         return self.get_session(now).market_status == "trading"
 
     def is_import_window_open(self, now: datetime | None = None) -> bool:
-        return self.get_session(now).market_status in {"pre_open", "closed"}
+        return self.get_session(now).market_status != "weekend"
+
+    def suggested_import_trade_date(self, now: datetime | None = None) -> str:
+        session = self.get_session(now)
+        if session.market_status in {"pre_open", "trading", "lunch_break"}:
+            return session.trade_date
+        return next_trading_date(session.trade_date)
 
 
 market_clock = MarketClock()

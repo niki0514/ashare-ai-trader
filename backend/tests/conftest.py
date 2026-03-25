@@ -8,11 +8,10 @@ from pathlib import Path
 
 
 TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="ashare-ai-trader-tests-"))
-TEST_DB_PATH = TEST_DB_DIR / "test.db"
+TEST_DB_PATH = TEST_DB_DIR / "test.sqlite3"
 
 os.environ.setdefault("ASHARE_DATABASE_URL", f"sqlite:///{TEST_DB_PATH}")
 os.environ.setdefault("ASHARE_ENGINE_ENABLED", "false")
-os.environ.setdefault("ASHARE_BOOTSTRAP_DEMO_DATA", "true")
 
 
 @atexit.register

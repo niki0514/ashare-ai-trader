@@ -41,6 +41,8 @@ export function orderStatusLabel(status: PendingOrderRow["status"] | "filled") {
       return "已触发";
     case "filled":
       return "已成交";
+    case "cancelled":
+      return "已撤单";
     case "expired":
       return "已失效";
     case "rejected":

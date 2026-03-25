@@ -41,6 +41,24 @@ class TencentQuoteClient:
                 rows.append(parsed)
         return rows
 
+    def fetch_quotes_sync(self, symbols: list[str]) -> list[Quote]:
+        if not symbols:
+            return []
+        url = f"{TENCENT_QUOTE_URL}{','.join(symbols)}"
+        with httpx.Client(timeout=settings.quote_timeout_seconds) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            text = response.text
+        rows: list[Quote] = []
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            parsed = self._parse_line(line)
+            if parsed:
+                rows.append(parsed)
+        return rows
+
     @staticmethod
     def _parse_line(line: str) -> Quote | None:
         # v_sz000001="51~平安银行~000001~11.62~11.68~11.63~..."
@@ -74,4 +92,8 @@ class TencentQuoteClient:
 
 
 def to_quote_symbol(symbol: str) -> str:
-    return symbol if symbol.startswith("sh") or symbol.startswith("sz") else (f"sh{symbol}" if symbol.startswith("6") else f"sz{symbol}")
+    if symbol.startswith(("sh", "sz", "bj")):
+        return symbol
+    if symbol.startswith(("4", "8", "92")):
+        return f"bj{symbol}"
+    return f"sh{symbol}" if symbol.startswith("6") else f"sz{symbol}"

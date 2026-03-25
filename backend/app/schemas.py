@@ -69,9 +69,10 @@ class PendingOrderRow(BaseModel):
     lots: int
     shares: int
     validity: Literal["DAY", "GTC"]
-    status: Literal["confirmed", "pending", "triggered", "filled", "expired", "rejected"]
+    status: Literal["confirmed", "pending", "triggered", "filled", "cancelled", "expired", "rejected"]
     statusMessage: str
     updatedAt: str
+    canDelete: bool = False
     detail: PendingOrderDetail
 
 
@@ -123,13 +124,28 @@ class DashboardMetrics(BaseModel):
 
 class DashboardResponse(BaseModel):
     tradeDate: str
+    suggestedImportTradeDate: str
     marketStatus: MarketStatus
     updatedAt: str
     metrics: DashboardMetrics
 
 
+class UserSummary(BaseModel):
+    id: str
+    name: str
+    initialCash: float
+    createdAt: str
+    updatedAt: str
+
+
+class CreateUserRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    initialCash: float = Field(gt=0)
+
+
 class ImportPreviewRow(BaseModel):
     rowNumber: int
+    tradeDate: str
     symbol: str
     side: Literal["BUY", "SELL"]
     price: float
@@ -144,6 +160,13 @@ class ImportPreviewResponse(BaseModel):
     targetTradeDate: str
     fileName: str | None = None
     sourceType: Literal["MANUAL", "XLSX", "CSV"] | None = None
+    rows: list[ImportPreviewRow]
+
+
+class ImportUploadResponse(BaseModel):
+    fileName: str | None = None
+    sourceType: Literal["XLSX", "CSV"]
+    batchIds: dict[str, str]
     rows: list[ImportPreviewRow]
 
 
@@ -185,3 +208,7 @@ class QuoteResponse(BaseModel):
 class ExecutionTickResult(BaseModel):
     processed: int
     updatedAt: datetime
+
+
+class DeleteOrderResponse(BaseModel):
+    deletedId: str

@@ -2,6 +2,7 @@ export type MarketStatus = "pre_open" | "trading" | "lunch_break" | "closed" | "
 
 export type DashboardResponse = {
   tradeDate: string;
+  suggestedImportTradeDate: string;
   marketStatus: MarketStatus;
   updatedAt: string;
   metrics: {
@@ -12,6 +13,14 @@ export type DashboardResponse = {
     cumulativePnl: number;
     exposureRatio: number;
   };
+};
+
+export type UserSummary = {
+  id: string;
+  name: string;
+  initialCash: number;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type PositionRow = {
@@ -48,9 +57,10 @@ export type PendingOrderRow = {
   lots: number;
   shares: number;
   validity: "DAY" | "GTC";
-  status: "confirmed" | "pending" | "triggered" | "filled" | "expired" | "rejected";
+  status: "confirmed" | "pending" | "triggered" | "filled" | "cancelled" | "expired" | "rejected";
   statusMessage: string;
   updatedAt: string;
+  canDelete: boolean;
   detail: {
     orderText: string;
     transitions: Array<{ at: string; status: string; message: string }>;
@@ -115,6 +125,7 @@ export type QuoteResponse = {
 
 export type ImportPreviewRow = {
   rowNumber: number;
+  tradeDate: string;
   symbol: string;
   side: "BUY" | "SELL";
   price: number;
@@ -132,9 +143,38 @@ export type ImportPreviewResponse = {
   rows: ImportPreviewRow[];
 };
 
+export type ImportUploadResponse = {
+  fileName?: string;
+  sourceType: "XLSX" | "CSV";
+  batchIds: Record<string, string>;
+  rows: ImportPreviewRow[];
+};
+
 export type ImportCommitResponse = {
   batchId: string;
   targetTradeDate: string;
   mode: "OVERWRITE" | "APPEND" | "DRAFT";
   importedCount: number;
+};
+
+export type LatestImportBatchItem = {
+  rowNumber: number;
+  symbol: string;
+  side: "BUY" | "SELL";
+  limitPrice: number;
+  lots: number;
+  validity: "DAY" | "GTC";
+  validationStatus: "VALID" | "WARNING" | "ERROR";
+  validationMessage?: string;
+};
+
+export type LatestImportBatch = {
+  id: string;
+  targetTradeDate: string;
+  sourceType: "MANUAL" | "XLSX" | "CSV";
+  fileName?: string;
+  mode: "OVERWRITE" | "APPEND" | "DRAFT";
+  status: "PENDING" | "VALIDATED" | "COMMITTED" | "FAILED";
+  createdAt: string;
+  items: LatestImportBatchItem[];
 };

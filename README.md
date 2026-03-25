@@ -13,11 +13,19 @@ This repository contains an instruction-driven A-share paper trading system.
 ### Backend
 
 ```bash
+make dev-up
+```
+
+或手动执行：
+
+```bash
+docker compose up -d postgres
 cd backend
+uv run python -m app.bootstrap
 uv run python -m app
 ```
 
-Backend runs on `http://localhost:3001`.
+Backend runs on `http://localhost:3101`.
 
 ### Frontend
 
@@ -29,24 +37,26 @@ npm run dev
 
 Frontend runs on `http://localhost:5174`.
 
-## Smoke 验收（推荐）
+`make dev-up` 会一起拉起 Docker PostgreSQL、初始化表结构、启动 backend 和 frontend。
+
+## Backend 验收
 
 ```bash
 cd backend
-uv run --with pytest --with pytest-asyncio pytest -q tests/test_smoke_e2e.py
+uv run pytest
 ```
 
-该链路覆盖：模板下载/上传预览 -> commit 导入 -> 挂单回读 -> dashboard/positions/history/pnl 关键接口回读。
-
-前端目前仍建议人工页面验收（见下方 Frontend 启动步骤），后端验收优先使用上述可重复 API smoke。
+当前保留的是不依赖仓库内置 mock/seed 的最小 API 回归。
 
 ## Backend Notes
 
 - Frontend API contract remains unchanged: `/api/dashboard`, `/api/positions`, `/api/history`, `/api/pnl/*`, `/api/imports/*`, `/api/quotes`
-- Default user is `test`; user isolation is supported via request header `X-User-Id`
-- During market hours, the backend polls Tencent quotes and persists trades in real time
-- After market close, close prices and the day’s frozen PnL snapshot are persisted to the configured database
-- The default runtime database now lives outside the repo at `~/.ashare-ai-trader/ashare_ai_trader.db`
+- Frontend dev server proxies `/api` to backend by default, so browsers no longer depend on direct `localhost:3001` access
+- Users are fully managed in the database; user isolation is supported via request header `X-User-Id`
+- During trading hours, the backend polls Tencent quotes and persists trades in real time
+- At lunch break and market close, the engine freezes the current session prices into the database; outside trading, dashboard reads persisted snapshots instead of request-time quotes
+- The default database is Docker PostgreSQL: `postgresql+psycopg://ashare:ashare@127.0.0.1:5433/ashare_ai_trader`
+- `uv run python -m app.bootstrap` only initializes the active schema
 
 ## PnL Source of Truth
 
@@ -61,4 +71,4 @@ uv run --with pytest --with pytest-asyncio pytest -q tests/test_smoke_e2e.py
 - 收益真值基线以当前 Python 后端回归测试为准，不再依赖历史迁移样本
 
 See `backend/README.md` for more details.
-Database decoupling and ingestion notes live in `docs/database-decoupling-and-ingestion.md`.
+Docker PostgreSQL setup notes live in `docs/docker-postgres-setup.md`.

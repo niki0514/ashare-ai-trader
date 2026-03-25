@@ -24,6 +24,7 @@ class OrderStatus(str, enum.Enum):
     pending = "pending"
     triggered = "triggered"
     filled = "filled"
+    cancelled = "cancelled"
     expired = "expired"
     rejected = "rejected"
 
@@ -257,11 +258,32 @@ class ImportBatchItem(Base):
     batch: Mapped[ImportBatch] = relationship(back_populates="items")
 
 
-class DailyPrice(Base):
-    __tablename__ = "daily_prices"
+class IntradayQuote(Base):
+    __tablename__ = "intraday_quotes"
     __table_args__ = (
-        UniqueConstraint("symbol", "trade_date", name="uq_daily_prices_symbol_trade_date"),
-        Index("ix_daily_prices_trade_symbol", "trade_date", "symbol"),
+        UniqueConstraint("symbol", "quoted_at", name="uq_intraday_quotes_symbol_quoted_at"),
+        Index("ix_intraday_quotes_trade_symbol_time", "trade_date", "symbol", "quoted_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    symbol_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    trade_date: Mapped[str] = mapped_column(String(10))
+    quoted_at: Mapped[datetime] = mapped_column(DateTime)
+    price: Mapped[float] = mapped_column(Float)
+    open_price: Mapped[float] = mapped_column(Float, default=0)
+    previous_close: Mapped[float] = mapped_column(Float, default=0)
+    high_price: Mapped[float] = mapped_column(Float, default=0)
+    low_price: Mapped[float] = mapped_column(Float, default=0)
+    source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class EodPrice(Base):
+    __tablename__ = "eod_prices"
+    __table_args__ = (
+        UniqueConstraint("symbol", "trade_date", name="uq_eod_prices_symbol_trade_date"),
+        Index("ix_eod_prices_trade_symbol", "trade_date", "symbol"),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -275,20 +297,5 @@ class DailyPrice(Base):
     low_price: Mapped[float] = mapped_column(Float, default=0)
     is_final: Mapped[bool] = mapped_column(Boolean, default=True)
     source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-
-class QuoteSnapshot(Base):
-    __tablename__ = "quote_snapshots"
-    __table_args__ = (UniqueConstraint("symbol", name="uq_quote_snapshots_symbol"),)
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    symbol: Mapped[str] = mapped_column(String(16))
-    symbol_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    price: Mapped[float] = mapped_column(Float)
-    open_price: Mapped[float] = mapped_column(Float, default=0)
-    previous_close: Mapped[float] = mapped_column(Float, default=0)
-    high_price: Mapped[float] = mapped_column(Float, default=0)
-    low_price: Mapped[float] = mapped_column(Float, default=0)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
-    source: Mapped[str | None] = mapped_column(String(32), nullable=True)

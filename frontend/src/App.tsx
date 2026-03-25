@@ -1,15 +1,29 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
-import { api, type ManualImportRowInput } from "./api";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+  type ReactNode,
+} from "react";
+import {
+  api,
+  getActiveUserId as readActiveUserId,
+  setActiveUserId as persistActiveUserId,
+  type ManualImportRowInput,
+} from "./api";
 import type {
   CalendarDay,
   DailyPnlDetailRow,
   DashboardResponse,
   HistoryRow,
+  LatestImportBatch,
   MarketStatus,
   PendingOrderRow,
-  ImportPreviewResponse,
   ImportPreviewRow,
   PositionRow,
+  UserSummary,
 } from "./types";
 import {
   formatCurrency,
@@ -20,13 +34,17 @@ import {
 } from "./utils";
 
 type TabKey = "positions" | "history" | "pnl" | "import";
+type ImportOrderFilter = "active" | "all" | "filled" | "cancelled" | "expired" | "rejected";
 
 const tabs: Array<{ key: TabKey; label: string }> = [
   { key: "positions", label: "持仓明细" },
   { key: "history", label: "历史流水" },
   { key: "pnl", label: "每日收益" },
-  { key: "import", label: "操作导入" },
+  { key: "import", label: "操作录入" },
 ];
+const CORE_DATA_POLL_MS = 3000;
+const DEFAULT_NEW_USER_CASH = "500000";
+const WORKFLOW_FEEDBACK_DURATION_MS = 2000;
 
 const WEEKDAY_LABELS = ["一", "二", "三", "四", "五", "六", "日"];
 
@@ -34,9 +52,12 @@ type ManualInputRow = {
   id: string;
   symbol: string;
   side: ManualImportRowInput["side"];
+  tradeDate: string;
+  validity: ManualImportRowInput["validity"];
   price: string;
   lots: string;
-  validity: ManualImportRowInput["validity"];
+  validationStatus: ImportPreviewRow["validationStatus"] | null;
+  validationMessage: string;
 };
 
 const MANUAL_SIDE_OPTIONS: Array<{ value: ManualImportRowInput["side"]; label: string }> = [
@@ -44,12 +65,32 @@ const MANUAL_SIDE_OPTIONS: Array<{ value: ManualImportRowInput["side"]; label: s
   { value: "SELL", label: "卖出" },
 ];
 
-const MANUAL_VALIDITY_OPTIONS: Array<{ value: ManualImportRowInput["validity"]; label: string }> = [
-  { value: "DAY", label: "当日有效" },
-  { value: "GTC", label: "持续有效" },
+const MANUAL_VALIDITY_OPTIONS: Array<{
+  value: ManualImportRowInput["validity"];
+  label: string;
+}> = [
+  { value: "DAY", label: "当日挂单" },
+  { value: "GTC", label: "持续挂单" },
 ];
 
-function createManualInputRow(seed: Partial<ManualImportRowInput> = {}): ManualInputRow {
+const IMPORT_ORDER_FILTER_OPTIONS: Array<{ value: ImportOrderFilter; label: string }> = [
+  { value: "active", label: "进行中" },
+  { value: "all", label: "全部" },
+  { value: "filled", label: "已成交" },
+  { value: "cancelled", label: "已撤单" },
+  { value: "expired", label: "已失效" },
+  { value: "rejected", label: "已拒绝" },
+];
+
+function createManualInputRow(
+  seed: Partial<
+    ManualImportRowInput & {
+      tradeDate: string;
+      validationStatus: ImportPreviewRow["validationStatus"] | null;
+      validationMessage: string;
+    }
+  > = {},
+): ManualInputRow {
   return {
     id:
       typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -57,26 +98,66 @@ function createManualInputRow(seed: Partial<ManualImportRowInput> = {}): ManualI
         : `${Date.now()}-${Math.random()}`,
     symbol: seed.symbol ?? "",
     side: seed.side ?? "BUY",
+    tradeDate: seed.tradeDate ?? "",
+    validity: seed.validity ?? "DAY",
     price: seed.price === undefined ? "" : String(seed.price),
     lots: seed.lots === undefined ? "1" : String(seed.lots),
-    validity: seed.validity ?? "DAY",
+    validationStatus: seed.validationStatus ?? null,
+    validationMessage: seed.validationMessage ?? "",
   };
 }
 
-function createManualRowsFromPreview(rows: ImportPreviewRow[]): ManualInputRow[] {
+function createManualRowsFromPreview(
+  rows: ImportPreviewRow[],
+  fallbackTradeDate: string,
+): ManualInputRow[] {
   if (rows.length === 0) {
-    return [createManualInputRow()];
+    return [createManualInputRow({ tradeDate: fallbackTradeDate })];
   }
 
   return rows.map((row) =>
     createManualInputRow({
       symbol: row.symbol,
       side: row.side,
+      tradeDate: row.tradeDate || fallbackTradeDate,
+      validity: row.validity,
       price: row.price,
       lots: row.lots,
-      validity: row.validity,
+      validationStatus: row.validationStatus,
+      validationMessage: row.validationMessage,
     }),
   );
+}
+
+function createManualRowsFromBatch(batch: LatestImportBatch): ManualInputRow[] {
+  if (batch.items.length === 0) {
+    return [createManualInputRow({ tradeDate: batch.targetTradeDate })];
+  }
+
+  return batch.items.map((item) =>
+    createManualInputRow({
+      symbol: item.symbol,
+      side: item.side,
+      tradeDate: batch.targetTradeDate,
+      validity: item.validity,
+      price: item.limitPrice,
+      lots: item.lots,
+      validationStatus: item.validationStatus,
+      validationMessage: item.validationMessage ?? "",
+    }),
+  );
+}
+
+function clearManualRowValidation(row: ManualInputRow): ManualInputRow {
+  if (row.validationStatus === null && row.validationMessage === "") {
+    return row;
+  }
+
+  return {
+    ...row,
+    validationStatus: null,
+    validationMessage: "",
+  };
 }
 
 function isManualRowTouched(row: ManualInputRow) {
@@ -96,18 +177,172 @@ function parseManualNumber(value: string) {
 
 function isManualRowComplete(row: ManualInputRow) {
   return (
+    row.tradeDate.trim() !== "" &&
     row.symbol.trim() !== "" &&
     parseManualNumber(row.price) > 0 &&
     parseManualNumber(row.lots) > 0
   );
 }
 
+function importValidationSummary(rows: ManualInputRow[]) {
+  return rows.reduce(
+    (summary, row) => {
+      if (row.validationStatus) {
+        summary[row.validationStatus] += 1;
+      }
+      return summary;
+    },
+    { VALID: 0, WARNING: 0, ERROR: 0 },
+  );
+}
+
+function importValidationLabel(status: ImportPreviewRow["validationStatus"] | "PENDING") {
+  switch (status) {
+    case "VALID":
+      return "通过";
+    case "WARNING":
+      return "警告";
+    case "ERROR":
+      return "错误";
+    default:
+      return "待校验";
+  }
+}
+
+function importRowValidationState(row: ManualInputRow, isDraftDirty: boolean) {
+  if (!isManualRowTouched(row)) {
+    return {
+      badgeClassName: "status-pill validation-pending",
+      label: "未填写",
+      message: "可继续补充这一行，空白行不会参与校验和提交。",
+    };
+  }
+
+  if (!isManualRowComplete(row)) {
+    return {
+      badgeClassName: "status-pill validation-pending",
+      label: "待补全",
+      message: "请补全挂单时间、股票代码、委托价和手数后再校验。",
+    };
+  }
+
+  if (row.validationStatus) {
+    return {
+      badgeClassName: `status-pill validation-${row.validationStatus.toLowerCase()}`,
+      label: importValidationLabel(row.validationStatus),
+      message: row.validationMessage || "校验通过",
+    };
+  }
+
+  return {
+    badgeClassName: "status-pill validation-pending",
+    label: "待校验",
+    message: isDraftDirty ? "内容已修改，请重新校验。" : "点击“校验全部”获取最新结果。",
+  };
+}
+
+function formatDraftSavedAt(value: string) {
+  return new Date(value).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function currentDraftSavedAt() {
+  return formatDraftSavedAt(new Date().toISOString());
+}
+
 function tradeSideLabel(side: "BUY" | "SELL") {
   return side === "BUY" ? "买入" : "卖出";
 }
 
-function validityLabel(validity: ManualImportRowInput["validity"]) {
-  return validity === "DAY" ? "当日有效" : "持续有效";
+function orderValidityLabel(validity: ManualImportRowInput["validity"]) {
+  return validity === "GTC" ? "持续挂单" : "当日挂单";
+}
+
+function isActivePendingOrderStatus(status: PendingOrderRow["status"]) {
+  return status === "confirmed" || status === "pending" || status === "triggered";
+}
+
+function isPendingOrderEffectiveToday(order: PendingOrderRow, currentTradeDate: string) {
+  if (!isActivePendingOrderStatus(order.status)) {
+    return false;
+  }
+
+  if (order.tradeDate === currentTradeDate) {
+    return true;
+  }
+
+  return order.validity === "GTC" && order.tradeDate < currentTradeDate;
+}
+
+function matchesImportOrderFilter(order: PendingOrderRow, filter: ImportOrderFilter) {
+  if (filter === "all") {
+    return true;
+  }
+
+  if (filter === "active") {
+    return isActivePendingOrderStatus(order.status);
+  }
+
+  return order.status === filter;
+}
+
+function manualImportPayload(row: ManualInputRow): ManualImportRowInput {
+  return {
+    symbol: row.symbol.trim().toUpperCase(),
+    side: row.side,
+    price: parseManualNumber(row.price),
+    lots: parseManualNumber(row.lots),
+    validity: row.validity,
+  };
+}
+
+function groupManualRowsByTradeDate(rows: ManualInputRow[]) {
+  const grouped = new Map<
+    string,
+    Array<{
+      rowId: string;
+      payload: ManualImportRowInput;
+    }>
+  >();
+
+  for (const row of rows) {
+    const tradeDate = row.tradeDate.trim();
+    const bucket = grouped.get(tradeDate) ?? [];
+    bucket.push({
+      rowId: row.id,
+      payload: manualImportPayload(row),
+    });
+    grouped.set(tradeDate, bucket);
+  }
+
+  return Array.from(grouped.entries())
+    .map(([tradeDate, items]) => ({ tradeDate, items }))
+    .sort((a, b) => a.tradeDate.localeCompare(b.tradeDate));
+}
+
+function nextManualRowTradeDate(
+  rows: ManualInputRow[],
+  fallbackTradeDate: string,
+  afterId?: string,
+) {
+  if (afterId) {
+    const matched = rows.find((row) => row.id === afterId);
+    if (matched?.tradeDate) {
+      return matched.tradeDate;
+    }
+  }
+
+  const lastTradeDate = [...rows]
+    .reverse()
+    .map((row) => row.tradeDate.trim())
+    .find((value) => value !== "");
+
+  return lastTradeDate ?? fallbackTradeDate;
 }
 
 function tradeDateOf(value: string) {
@@ -128,20 +363,6 @@ function shiftMonthKey(monthKey: string, offset: number) {
   return `${new Date(year, month - 1 + offset, 1).getFullYear()}-${String(
     new Date(year, month - 1 + offset, 1).getMonth() + 1,
   ).padStart(2, "0")}`;
-}
-
-function nextTradingDate(tradeDate: string) {
-  const [year, month, day] = tradeDate.split("-").map(Number);
-  const nextDate = new Date(year, month - 1, day);
-
-  do {
-    nextDate.setDate(nextDate.getDate() + 1);
-  } while (nextDate.getDay() === 0 || nextDate.getDay() === 6);
-
-  const nextYear = nextDate.getFullYear();
-  const nextMonth = String(nextDate.getMonth() + 1).padStart(2, "0");
-  const nextDay = String(nextDate.getDate()).padStart(2, "0");
-  return `${nextYear}-${nextMonth}-${nextDay}`;
 }
 
 function buildMonthCells(monthKey: string, rowsByDate: Map<string, CalendarDay>) {
@@ -169,6 +390,8 @@ function buildMonthCells(monthKey: string, rowsByDate: Map<string, CalendarDay>)
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabKey>("positions");
+  const [users, setUsers] = useState<UserSummary[]>([]);
+  const [activeUserId, setActiveUserIdState] = useState<string>(readActiveUserId());
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null);
   const [positions, setPositions] = useState<PositionRow[]>([]);
   const [pendingOrders, setPendingOrders] = useState<PendingOrderRow[]>([]);
@@ -176,9 +399,29 @@ export default function App() {
   const [calendar, setCalendar] = useState<CalendarDay[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>("2026-03-18");
   const [dailyDetail, setDailyDetail] = useState<DailyPnlDetailRow[]>([]);
-  const [previewRows, setPreviewRows] = useState<ImportPreviewRow[]>([]);
+  const [newUserName, setNewUserName] = useState("");
+  const [newUserCash, setNewUserCash] = useState(DEFAULT_NEW_USER_CASH);
+  const [showCreateUserForm, setShowCreateUserForm] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [usersLoaded, setUsersLoaded] = useState(false);
+  const [userActionLoading, setUserActionLoading] = useState(false);
+  const [deletingPendingOrderId, setDeletingPendingOrderId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string>("");
+  const refreshingCoreDataRef = useRef(false);
+  const createUserNameInputRef = useRef<HTMLInputElement | null>(null);
+  const isDashboardReady = dashboard !== null;
+  const shouldAutoRefresh =
+    isDashboardReady && activeTab !== "import" && dashboard.marketStatus === "trading";
+  const activeUser = users.find((user) => user.id === activeUserId) ?? null;
+
+  function resetUserScopedData() {
+    setDashboard(null);
+    setPositions([]);
+    setPendingOrders([]);
+    setHistory([]);
+    setCalendar([]);
+    setDailyDetail([]);
+  }
 
   async function loadCoreData(currentSelectedDate: string) {
     const [dashboardRes, positionsRes, pendingOrdersRes, historyRes, calendarRes, dailyRes] =
@@ -199,13 +442,49 @@ export default function App() {
     setDailyDetail(dailyRes.rows);
   }
 
+  async function syncUsers(preferredUserId?: string) {
+    const response = await api.getUsers();
+    const nextUsers = response.rows;
+    setUsersLoaded(true);
+    setUsers(nextUsers);
+    if (nextUsers.length === 0) {
+      persistActiveUserId("");
+      setActiveUserIdState("");
+      return null;
+    }
+
+    const storedUserId = preferredUserId ?? readActiveUserId();
+    const resolvedUserId = nextUsers.some((user) => user.id === storedUserId)
+      ? storedUserId
+      : nextUsers[0].id;
+
+    persistActiveUserId(resolvedUserId);
+    setActiveUserIdState(resolvedUserId);
+    return resolvedUserId;
+  }
+
+  async function reloadForUser(nextUserId?: string, currentSelectedDate: string = selectedDate) {
+    const resolvedUserId = await syncUsers(nextUserId);
+    if (!resolvedUserId) {
+      refreshingCoreDataRef.current = false;
+      resetUserScopedData();
+      return null;
+    }
+    if (resolvedUserId !== activeUserId) {
+      refreshingCoreDataRef.current = false;
+    }
+    await loadCoreData(currentSelectedDate);
+    return resolvedUserId;
+  }
+
   useEffect(() => {
     async function bootstrap() {
       setLoading(true);
+      setUsersLoaded(false);
       setErrorMessage("");
 
       try {
-        await loadCoreData(selectedDate);
+        await reloadForUser(readActiveUserId(), selectedDate);
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "加载失败");
       } finally {
@@ -217,7 +496,34 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!showCreateUserForm) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !userActionLoading) {
+        handleCancelCreateUser();
+      }
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+    createUserNameInputRef.current?.focus();
+    createUserNameInputRef.current?.select();
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showCreateUserForm, userActionLoading]);
+
+  useEffect(() => {
     async function loadDaily() {
+      if (!activeUserId) {
+        setDailyDetail([]);
+        return;
+      }
       try {
         const response = await api.getDailyPnlDetail(selectedDate);
         setDailyDetail(response.rows);
@@ -240,38 +546,244 @@ export default function App() {
   }, [calendar, selectedDate]);
 
   useEffect(() => {
-    if (!dashboard) {
+    if (!shouldAutoRefresh) {
       return;
     }
 
-    const timer = window.setInterval(async () => {
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const scheduleNextRefresh = () => {
+      if (cancelled) {
+        return;
+      }
+
+      timer = window.setTimeout(() => {
+        void refreshCoreData();
+      }, CORE_DATA_POLL_MS);
+    };
+
+    const refreshCoreData = async () => {
+      if (cancelled || refreshingCoreDataRef.current) {
+        scheduleNextRefresh();
+        return;
+      }
+
+      refreshingCoreDataRef.current = true;
+
       try {
         await loadCoreData(selectedDate);
       } catch (error) {
-        setErrorMessage(error instanceof Error ? error.message : "刷新失败");
+        if (!cancelled) {
+          setErrorMessage(error instanceof Error ? error.message : "刷新失败");
+        }
+      } finally {
+        refreshingCoreDataRef.current = false;
       }
-    }, 1000);
+      scheduleNextRefresh();
+    };
 
-    return () => window.clearInterval(timer);
-  }, [dashboard, selectedDate]);
+    scheduleNextRefresh();
 
-  if (loading || !dashboard) {
+    return () => {
+      cancelled = true;
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [selectedDate, shouldAutoRefresh]);
+
+  async function handleUserChange(nextUserId: string) {
+    setUserActionLoading(true);
+    setErrorMessage("");
+    try {
+      await reloadForUser(nextUserId);
+      setNewUserName("");
+      setNewUserCash(DEFAULT_NEW_USER_CASH);
+      setShowCreateUserForm(false);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "切换账户失败");
+    } finally {
+      setUserActionLoading(false);
+    }
+  }
+
+  async function handleCreateUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmedName = newUserName.trim();
+    if (trimmedName === "") {
+      setErrorMessage("用户名称不能为空");
+      return;
+    }
+    const initialCash = Number(newUserCash);
+    if (!Number.isFinite(initialCash) || initialCash <= 0) {
+      setErrorMessage("初始资金必须大于 0");
+      return;
+    }
+
+    setUserActionLoading(true);
+    setErrorMessage("");
+    try {
+      const created = await api.createUser({
+        name: trimmedName,
+        initialCash,
+      });
+      setNewUserName("");
+      setNewUserCash(DEFAULT_NEW_USER_CASH);
+      setShowCreateUserForm(false);
+      await reloadForUser(created.id);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "创建账户失败");
+    } finally {
+      setUserActionLoading(false);
+    }
+  }
+
+  function handleOpenCreateUserForm() {
+    setErrorMessage("");
+    setNewUserName("");
+    setNewUserCash(DEFAULT_NEW_USER_CASH);
+    setShowCreateUserForm(true);
+  }
+
+  function handleCancelCreateUser() {
+    setErrorMessage("");
+    setNewUserName("");
+    setNewUserCash(DEFAULT_NEW_USER_CASH);
+    setShowCreateUserForm(false);
+  }
+
+  async function handleDeletePendingOrder(order: PendingOrderRow) {
+    if (!order.canDelete || deletingPendingOrderId) {
+      return;
+    }
+
+    setDeletingPendingOrderId(order.id);
+    setErrorMessage("");
+    try {
+      await api.deleteOrder(order.id);
+      await loadCoreData(selectedDate);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "撤单失败");
+    } finally {
+      setDeletingPendingOrderId(null);
+    }
+  }
+
+  if (loading) {
     return <div className="loading-shell">{errorMessage || "Loading trading dashboard..."}</div>;
+  }
+
+  if (!usersLoaded && errorMessage) {
+    return <div className="loading-shell">{errorMessage}</div>;
+  }
+
+  if (!activeUser) {
+    return (
+      <div className="app-shell">
+        <header className="top-shell compact-top-shell">
+          <div className="meta-cluster meta-cluster-left">
+            <span>当前暂无账户</span>
+          </div>
+        </header>
+
+        <section className="empty-account-state">
+          <div className="empty-account-card">
+            <div className="section-head">
+              <h2>创建首个账户</h2>
+            </div>
+            <p className="empty-account-copy">先创建一个账户，再开始记录持仓、流水和每日收益。</p>
+            <button
+              type="button"
+              className="user-primary-button"
+              disabled={userActionLoading}
+              onClick={handleOpenCreateUserForm}
+            >
+              + 新建账户
+            </button>
+          </div>
+        </section>
+
+        {showCreateUserForm ? (
+          <CreateUserModal
+            name={newUserName}
+            cash={newUserCash}
+            errorMessage={errorMessage}
+            loading={userActionLoading}
+            inputRef={createUserNameInputRef}
+            onNameChange={setNewUserName}
+            onCashChange={setNewUserCash}
+            onCancel={handleCancelCreateUser}
+            onSubmit={handleCreateUser}
+          />
+        ) : null}
+      </div>
+    );
+  }
+
+  if (!dashboard) {
+    return <div className="loading-shell">{errorMessage || "加载账户数据失败"}</div>;
   }
 
   return (
     <div className="app-shell">
       <header className="top-shell compact-top-shell">
-        <div className="meta-cluster meta-cluster-left">
-          <span>交易日 {dashboard.tradeDate}</span>
-          <span>最新更新 {new Date(dashboard.updatedAt).toLocaleTimeString("zh-CN")}</span>
-        </div>
-        <div className="meta-cluster meta-cluster-right">
+        <div className="meta-cluster meta-cluster-left meta-cluster-primary">
           <span className={`status-pill market-${dashboard.marketStatus}`}>
             {statusLabel(dashboard.marketStatus)}
           </span>
+          <span>交易日 {dashboard.tradeDate}</span>
+          <span>最新更新 {new Date(dashboard.updatedAt).toLocaleTimeString("zh-CN")}</span>
+        </div>
+        <div className="account-toolbar">
+          <label className="account-switcher">
+            <span className="account-toolbar-label">账户</span>
+            <div className="account-switcher-select">
+              <select
+                value={activeUserId}
+                onChange={(event) => void handleUserChange(event.target.value)}
+                disabled={userActionLoading || showCreateUserForm}
+              >
+                {users.map((user) => (
+                  <option key={user.id} value={user.id}>
+                    {user.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </label>
+          <div className="account-summary-pill">
+            <span className="account-toolbar-label">初始资金</span>
+            <strong>{formatCurrency(activeUser.initialCash)}</strong>
+          </div>
+          <button
+            type="button"
+            className="user-primary-button account-create-button"
+            disabled={userActionLoading}
+            onClick={handleOpenCreateUserForm}
+          >
+            + 新建账户
+          </button>
         </div>
       </header>
+
+      {errorMessage && !showCreateUserForm ? (
+        <div className="user-feedback user-feedback-error">{errorMessage}</div>
+      ) : null}
+
+      {showCreateUserForm ? (
+        <CreateUserModal
+          name={newUserName}
+          cash={newUserCash}
+          errorMessage={errorMessage}
+          loading={userActionLoading}
+          inputRef={createUserNameInputRef}
+          onNameChange={setNewUserName}
+          onCashChange={setNewUserCash}
+          onCancel={handleCancelCreateUser}
+          onSubmit={handleCreateUser}
+        />
+      ) : null}
 
       <section className="metric-grid">
         <MetricCard label="总资产" value={formatCurrency(dashboard.metrics.totalAssets)} />
@@ -307,7 +819,15 @@ export default function App() {
       </nav>
 
       <main className="panel-shell">
-        {activeTab === "positions" && <PositionsTab rows={positions} />}
+        {activeTab === "positions" && (
+          <PositionsTab
+            rows={positions}
+            pendingOrders={pendingOrders}
+            currentTradeDate={dashboard.tradeDate}
+            deletingOrderId={deletingPendingOrderId}
+            onDeleteOrder={handleDeletePendingOrder}
+          />
+        )}
         {activeTab === "history" && (
           <HistoryTab
             rows={history}
@@ -328,16 +848,97 @@ export default function App() {
         )}
         {activeTab === "import" && (
           <ImportTab
+            key={`${activeUserId}-${dashboard.suggestedImportTradeDate}`}
             marketStatus={dashboard.marketStatus}
-            targetTradeDate={nextTradingDate(dashboard.tradeDate)}
-            previewRows={previewRows}
-            onPreviewUpdate={(response) => {
-              setPreviewRows(response?.rows ?? []);
-            }}
+            pendingOrders={pendingOrders}
+            targetTradeDate={dashboard.suggestedImportTradeDate}
             onImportCommitted={() => loadCoreData(selectedDate)}
           />
         )}
       </main>
+    </div>
+  );
+}
+
+function CreateUserModal({
+  name,
+  cash,
+  errorMessage,
+  loading,
+  inputRef,
+  onNameChange,
+  onCashChange,
+  onCancel,
+  onSubmit,
+}: {
+  name: string;
+  cash: string;
+  errorMessage: string;
+  loading: boolean;
+  inputRef: { current: HTMLInputElement | null };
+  onNameChange: (value: string) => void;
+  onCashChange: (value: string) => void;
+  onCancel: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+}) {
+  return (
+    <div className="modal-backdrop" onClick={loading ? undefined : onCancel}>
+      <div className="modal-card create-user-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <h3>新建账户</h3>
+            <p>创建一个独立账户，并设置它的起始资金。</p>
+          </div>
+          <button
+            type="button"
+            className="modal-close-button"
+            onClick={onCancel}
+            disabled={loading}
+            aria-label="关闭新建账户弹窗"
+          >
+            关闭
+          </button>
+        </div>
+        <form className="modal-form" noValidate onSubmit={(event) => void onSubmit(event)}>
+          <label className="modal-field">
+            <span>用户名称</span>
+            <input
+              ref={inputRef}
+              value={name}
+              onChange={(event) => onNameChange(event.target.value)}
+              placeholder="例如：Alice"
+              disabled={loading}
+            />
+          </label>
+          <label className="modal-field">
+            <span>初始资金</span>
+            <input
+              type="number"
+              min="0.01"
+              step="0.01"
+              inputMode="decimal"
+              value={cash}
+              onChange={(event) => onCashChange(event.target.value)}
+              placeholder="500000"
+              disabled={loading}
+            />
+          </label>
+          {errorMessage ? <div className="modal-error">{errorMessage}</div> : null}
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="user-secondary-button"
+              onClick={onCancel}
+              disabled={loading}
+            >
+              取消
+            </button>
+            <button type="submit" className="user-primary-button" disabled={loading}>
+              {loading ? "创建中..." : "确认创建"}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
@@ -351,8 +952,29 @@ function MetricCard({ label, value, accent }: { label: string; value: string; ac
   );
 }
 
-function PositionsTab({ rows }: { rows: PositionRow[] }) {
-  const rowsWithPendingOrders = rows.filter((row) => row.pendingOrders.length > 0);
+function PositionsTab({
+  rows,
+  pendingOrders,
+  currentTradeDate,
+  deletingOrderId,
+  onDeleteOrder,
+}: {
+  rows: PositionRow[];
+  pendingOrders: PendingOrderRow[];
+  currentTradeDate: string;
+  deletingOrderId: string | null;
+  onDeleteOrder: (order: PendingOrderRow) => Promise<void> | void;
+}) {
+  const activePendingOrders = useMemo(
+    () =>
+      [...pendingOrders]
+        .filter((row) => isPendingOrderEffectiveToday(row, currentTradeDate))
+        .sort(
+          (a, b) =>
+            b.tradeDate.localeCompare(a.tradeDate) || b.updatedAt.localeCompare(a.updatedAt),
+        ),
+    [currentTradeDate, pendingOrders],
+  );
 
   return (
     <section className="positions-layout">
@@ -408,45 +1030,55 @@ function PositionsTab({ rows }: { rows: PositionRow[] }) {
       <div className="section-head compact">
         <h3>挂单明细</h3>
         <span>
-          {rowsWithPendingOrders.length > 0
-            ? `涉及 ${formatNumber(rowsWithPendingOrders.length)} 只持仓`
-            : "当前无卖出挂单"}
+          {activePendingOrders.length > 0
+            ? `当前 ${formatNumber(activePendingOrders.length)} 条当日待执行委托`
+            : "当前无当日待执行挂单"}
         </span>
       </div>
       <div className="pending-sections">
-        {rowsWithPendingOrders.length > 0 ? (
-          rowsWithPendingOrders.map((row) => (
-            <article key={`${row.symbol}-pending-card`} className="pending-orders-box">
-              <table className="pending-orders-table">
-                <thead>
-                  <tr>
-                    <th>目标交易日</th>
-                    <th>股票代码</th>
-                    <th>名称</th>
-                    <th>操作</th>
-                    <th>委托数量</th>
-                    <th>委托价格</th>
-                    <th>状态</th>
+        {activePendingOrders.length > 0 ? (
+          <article className="pending-orders-box">
+            <table className="pending-orders-table">
+              <thead>
+                <tr>
+                  <th>挂单日期</th>
+                  <th>股票代码</th>
+                  <th>操作</th>
+                  <th>挂单方式</th>
+                  <th>委托数量</th>
+                  <th>委托价格</th>
+                  <th>状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activePendingOrders.map((order) => (
+                  <tr key={order.id}>
+                    <td>{order.tradeDate}</td>
+                    <td>{order.symbol}</td>
+                    <td>{tradeSideLabel(order.side)}</td>
+                    <td>{orderValidityLabel(order.validity)}</td>
+                    <td>{formatNumber(order.shares)}</td>
+                    <td>{order.orderPrice.toFixed(2)}</td>
+                    <td>{orderStatusLabel(order.status)}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="order-delete-button"
+                        onClick={() => void onDeleteOrder(order)}
+                        disabled={deletingOrderId !== null || !order.canDelete}
+                        title={order.canDelete ? "撤回当前委托" : "已成交委托不可撤单"}
+                      >
+                        {deletingOrderId === order.id ? "撤单中..." : "撤单"}
+                      </button>
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {row.pendingOrders.map((order) => (
-                    <tr key={order.id}>
-                      <td>{order.tradeDate}</td>
-                      <td>{row.symbol}</td>
-                      <td>{row.name}</td>
-                      <td>{order.side === "BUY" ? "买入" : "卖出"}</td>
-                      <td>{formatNumber(order.shares)}</td>
-                      <td>{order.price.toFixed(2)}</td>
-                      <td>{orderStatusLabel(order.status)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </article>
-          ))
+                ))}
+              </tbody>
+            </table>
+          </article>
         ) : (
-          <div className="empty-panel">当前无卖出挂单</div>
+          <div className="empty-panel">当前无待执行挂单</div>
         )}
       </div>
     </section>
@@ -1003,126 +1635,255 @@ function PnlTab({
 
 function ImportTab({
   marketStatus,
+  pendingOrders,
   targetTradeDate,
-  previewRows,
-  onPreviewUpdate,
   onImportCommitted,
 }: {
   marketStatus: MarketStatus;
+  pendingOrders: PendingOrderRow[];
   targetTradeDate: string;
-  previewRows: ImportPreviewRow[];
-  onPreviewUpdate: (response: ImportPreviewResponse | null) => void;
   onImportCommitted: () => Promise<unknown> | unknown;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
   const [downloadingTemplate, setDownloadingTemplate] = useState(false);
+  const [clearingDraft, setClearingDraft] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
-  const [validatingSelection, setValidatingSelection] = useState(false);
+  const [validatingAll, setValidatingAll] = useState(false);
   const [submittingImport, setSubmittingImport] = useState(false);
+  const [deletingOrderId, setDeletingOrderId] = useState<string | null>(null);
+  const [restoringDraft, setRestoringDraft] = useState(false);
+  const [orderFilter, setOrderFilter] = useState<ImportOrderFilter>(
+    marketStatus === "closed" ? "all" : "active",
+  );
   const [draftSavedAt, setDraftSavedAt] = useState<string>("");
-  const [draftFeedback, setDraftFeedback] = useState<{
-    tone: "success" | "error";
-    text: string;
-  } | null>(null);
-  const [validationFeedback, setValidationFeedback] = useState<{
+  const [workflowFeedback, setWorkflowFeedback] = useState<{
     tone: "success" | "error";
     text: string;
   } | null>(null);
   const [isDraftDirty, setIsDraftDirty] = useState(false);
   const [draftFileName, setDraftFileName] = useState<string>("");
-  const [selectedDraftRowIds, setSelectedDraftRowIds] = useState<string[]>([]);
-  const [validationBatchId, setValidationBatchId] = useState<string | null>(null);
-  const [manualRows, setManualRows] = useState<ManualInputRow[]>([createManualInputRow()]);
-  const isImportWindowOpen = marketStatus === "pre_open" || marketStatus === "closed";
+  const [validationBatchIds, setValidationBatchIds] = useState<Record<string, string>>({});
+  const previousMarketStatusRef = useRef<MarketStatus | null>(null);
+  const [manualRows, setManualRows] = useState<ManualInputRow[]>([
+    createManualInputRow({ tradeDate: targetTradeDate }),
+  ]);
+  const isImportWindowOpen = marketStatus !== "weekend";
 
   const touchedManualRows = useMemo(() => manualRows.filter(isManualRowTouched), [manualRows]);
   const hasIncompleteManualRows = touchedManualRows.some((row) => !isManualRowComplete(row));
-  const normalizedManualRows: ManualImportRowInput[] = touchedManualRows.map((row) => ({
-    symbol: row.symbol.trim().toUpperCase(),
-    side: row.side,
-    price: parseManualNumber(row.price),
-    lots: parseManualNumber(row.lots),
-    validity: row.validity,
-  }));
-  const completeDraftRows = useMemo(
-    () => manualRows.filter((row) => isManualRowComplete(row)),
-    [manualRows],
+  const manualRowsByTradeDate = useMemo(
+    () => groupManualRowsByTradeDate(touchedManualRows),
+    [touchedManualRows],
   );
-  const completeDraftRowIds = useMemo(
-    () => new Set(completeDraftRows.map((row) => row.id)),
-    [completeDraftRows],
+  const manualTradeDates = useMemo(
+    () => manualRowsByTradeDate.map((group) => group.tradeDate).filter((value) => value !== ""),
+    [manualRowsByTradeDate],
   );
-  const selectedDraftRowIdSet = useMemo(
-    () => new Set(selectedDraftRowIds),
-    [selectedDraftRowIds],
+  const validationSummary = useMemo(
+    () => importValidationSummary(touchedManualRows),
+    [touchedManualRows],
   );
-  const selectedDraftRows = useMemo(
-    () => completeDraftRows.filter((row) => selectedDraftRowIdSet.has(row.id)),
-    [completeDraftRows, selectedDraftRowIdSet],
-  );
-  const canSaveManualDraft = normalizedManualRows.length > 0 && !hasIncompleteManualRows;
-  const canValidateSelection = selectedDraftRows.length > 0;
-  const canSubmitImport = validationBatchId !== null && previewRows.length > 0;
-  const allDraftRowsSelected =
-    completeDraftRows.length > 0 && selectedDraftRows.length === completeDraftRows.length;
+  const previewValidCount = validationSummary.VALID;
+  const previewWarningCount = validationSummary.WARNING;
+  const previewErrorCount = validationSummary.ERROR;
+  const canSaveManualDraft = manualTradeDates.length > 0 && !hasIncompleteManualRows;
+  const canValidateAll = canSaveManualDraft;
+  const canSubmitImport =
+    manualTradeDates.length > 0 &&
+    !hasIncompleteManualRows &&
+    previewErrorCount === 0 &&
+    manualTradeDates.every((tradeDate) => validationBatchIds[tradeDate]);
   const isWorking =
     uploading ||
     downloadingTemplate ||
+    clearingDraft ||
     savingDraft ||
-    validatingSelection ||
-    submittingImport;
+    validatingAll ||
+    submittingImport ||
+    deletingOrderId !== null ||
+    restoringDraft;
+  const importOrders = useMemo(
+    () =>
+      [...pendingOrders]
+        .filter((row) => matchesImportOrderFilter(row, orderFilter))
+        .sort(
+          (a, b) =>
+            b.tradeDate.localeCompare(a.tradeDate) || b.updatedAt.localeCompare(a.updatedAt),
+        ),
+    [orderFilter, pendingOrders],
+  );
 
   useEffect(() => {
-    setSelectedDraftRowIds((currentIds) =>
-      currentIds.filter((id) => completeDraftRowIds.has(id)),
+    setManualRows((currentRows) =>
+      currentRows.map((row) =>
+        isManualRowTouched(row) ? row : { ...row, tradeDate: targetTradeDate },
+      ),
     );
-  }, [completeDraftRowIds]);
+  }, [targetTradeDate]);
 
-  const draftStatusText = draftFeedback?.text
-    ? draftFeedback.text
-    : hasIncompleteManualRows
-      ? "请补全草稿中的未完成行"
-      : isDraftDirty
-        ? "草稿内容已修改"
-        : draftSavedAt
-          ? `草稿已保存 ${draftSavedAt}`
-          : "未保存草稿";
-  const validationStatusText = validationFeedback?.text
-    ? validationFeedback.text
-    : previewRows.length > 0
-      ? `已完成 ${previewRows.length} 条校验`
-      : selectedDraftRows.length > 0
-        ? `已选中 ${selectedDraftRows.length} 条，可进入下方校验`
-        : "请选择草稿中的完整行进入下方校验";
+  useEffect(() => {
+    if (
+      previousMarketStatusRef.current !== "closed" &&
+      marketStatus === "closed" &&
+      orderFilter === "active"
+    ) {
+      setOrderFilter("all");
+    }
+    previousMarketStatusRef.current = marketStatus;
+  }, [marketStatus, orderFilter]);
 
-  function resetValidationPreview() {
-    setValidationBatchId(null);
-    setValidationFeedback(null);
-    onPreviewUpdate(null);
+  useEffect(() => {
+    if (!workflowFeedback) {
+      return undefined;
+    }
+
+    const timerId = window.setTimeout(() => {
+      setWorkflowFeedback(null);
+    }, WORKFLOW_FEEDBACK_DURATION_MS);
+
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [workflowFeedback]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function restoreLatestDraft() {
+      setRestoringDraft(true);
+      setWorkflowFeedback(null);
+
+      try {
+        const response = await api.getLatestImports();
+        if (cancelled) {
+          return;
+        }
+
+        const latestDraftByTradeDate = new Map<string, LatestImportBatch>();
+        for (const batch of response.rows) {
+          if (batch.mode !== "DRAFT" || batch.status !== "VALIDATED") {
+            continue;
+          }
+          if (!latestDraftByTradeDate.has(batch.targetTradeDate)) {
+            latestDraftByTradeDate.set(batch.targetTradeDate, batch);
+          }
+        }
+
+        const latestDrafts = Array.from(latestDraftByTradeDate.values()).sort((a, b) =>
+          a.targetTradeDate.localeCompare(b.targetTradeDate),
+        );
+
+        if (latestDrafts.length === 0) {
+          setManualRows([createManualInputRow({ tradeDate: targetTradeDate })]);
+          setDraftSavedAt("");
+          setDraftFileName("");
+          setValidationBatchIds({});
+          setIsDraftDirty(false);
+          return;
+        }
+
+        setManualRows(latestDrafts.flatMap((batch) => createManualRowsFromBatch(batch)));
+        setDraftSavedAt(formatDraftSavedAt(latestDrafts[0].createdAt));
+        setDraftFileName(latestDrafts.length === 1 ? (latestDrafts[0].fileName ?? "") : "");
+        setValidationBatchIds(
+          Object.fromEntries(latestDrafts.map((batch) => [batch.targetTradeDate, batch.id])),
+        );
+        setIsDraftDirty(false);
+      } catch (error) {
+        if (!cancelled) {
+          setWorkflowFeedback({
+            tone: "error",
+            text: error instanceof Error ? error.message : "加载最近草稿失败",
+          });
+        }
+      } finally {
+        if (!cancelled) {
+          setRestoringDraft(false);
+        }
+      }
+    }
+
+    void restoreLatestDraft();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [targetTradeDate]);
+
+  function resetValidationState() {
+    setValidationBatchIds({});
+    setManualRows((currentRows) => currentRows.map(clearManualRowValidation));
   }
 
   function markDraftDirty() {
     setIsDraftDirty(true);
-    setDraftFeedback(null);
-    resetValidationPreview();
+    setWorkflowFeedback(null);
+    resetValidationState();
   }
 
-  function applyDraftSaved(nextRows?: ManualInputRow[], successText = "草稿已保存") {
-    if (nextRows) {
-      setManualRows(nextRows);
+  function syncRowsWithPreviewRows(previewByRowId: Map<string, ImportPreviewRow>) {
+    setManualRows((currentRows) => {
+      return currentRows.map((row) => {
+        if (!isManualRowTouched(row)) {
+          return clearManualRowValidation(row);
+        }
+
+        const preview = previewByRowId.get(row.id);
+
+        if (!preview) {
+          return clearManualRowValidation(row);
+        }
+
+        return {
+          ...row,
+          tradeDate: preview.tradeDate,
+          symbol: preview.symbol,
+          side: preview.side,
+          validity: preview.validity,
+          price: String(preview.price),
+          lots: String(preview.lots),
+          validationStatus: preview.validationStatus,
+          validationMessage: preview.validationMessage,
+        };
+      });
+    });
+  }
+
+  function applyValidatedDrafts({
+    batches,
+    successText,
+    fileName,
+    savedAt,
+  }: {
+    batches: Array<{
+      tradeDate: string;
+      rowIds: string[];
+      batchId: string;
+      rows: ImportPreviewRow[];
+    }>;
+    successText: string;
+    fileName?: string;
+    savedAt?: string;
+  }) {
+    const previewByRowId = new Map<string, ImportPreviewRow>();
+    for (const batch of batches) {
+      batch.rowIds.forEach((rowId, index) => {
+        const preview = batch.rows[index];
+        if (preview) {
+          previewByRowId.set(rowId, preview);
+        }
+      });
     }
-    setDraftSavedAt(
-      new Date().toLocaleTimeString("zh-CN", {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false,
-      }),
+
+    syncRowsWithPreviewRows(previewByRowId);
+    setValidationBatchIds(
+      Object.fromEntries(batches.map((batch) => [batch.tradeDate, batch.batchId])),
     );
+    setDraftSavedAt(savedAt ?? currentDraftSavedAt());
+    setDraftFileName(fileName ?? "");
     setIsDraftDirty(false);
-    setDraftFeedback({ tone: "success", text: successText });
-    resetValidationPreview();
+    setWorkflowFeedback({ tone: "success", text: successText });
   }
 
   function updateManualRow<K extends Exclude<keyof ManualInputRow, "id">>(
@@ -1139,7 +1900,9 @@ function ImportTab({
   function addManualRow(afterId?: string) {
     markDraftDirty();
     setManualRows((currentRows) => {
-      const nextRow = createManualInputRow();
+      const nextRow = createManualInputRow({
+        tradeDate: nextManualRowTradeDate(currentRows, targetTradeDate, afterId),
+      });
 
       if (!afterId) {
         return [...currentRows, nextRow];
@@ -1163,43 +1926,71 @@ function ImportTab({
     markDraftDirty();
     setManualRows((currentRows) => {
       if (currentRows.length === 1) {
-        return [createManualInputRow()];
+        return [createManualInputRow({ tradeDate: targetTradeDate })];
       }
 
       return currentRows.filter((row) => row.id !== id);
     });
   }
 
-  function resetManualRows() {
-    setDraftFeedback(null);
-    setValidationFeedback(null);
+  function resetManualRowsState() {
+    setWorkflowFeedback(null);
     setIsDraftDirty(false);
     setDraftSavedAt("");
     setDraftFileName("");
-    setSelectedDraftRowIds([]);
-    setValidationBatchId(null);
-    onPreviewUpdate(null);
+    setValidationBatchIds({});
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
-    setManualRows([createManualInputRow()]);
+    setManualRows([createManualInputRow({ tradeDate: targetTradeDate })]);
+  }
+
+  async function handleClearManualRows() {
+    setWorkflowFeedback(null);
+    setClearingDraft(true);
+
+    try {
+      const tradeDatesToClear = Array.from(
+        new Set(
+          [
+            ...Object.keys(validationBatchIds),
+            ...touchedManualRows.map((row) => row.tradeDate.trim()),
+          ].filter((value) => value !== ""),
+        ),
+      );
+      const dates = tradeDatesToClear.length > 0 ? tradeDatesToClear : [targetTradeDate];
+      await Promise.all(dates.map((tradeDate) => api.clearImportDrafts(tradeDate)));
+      resetManualRowsState();
+    } catch (error) {
+      setWorkflowFeedback({
+        tone: "error",
+        text: error instanceof Error ? error.message : "清空草稿失败",
+      });
+    } finally {
+      setClearingDraft(false);
+    }
   }
 
   async function handleUpload(file: File) {
-    setDraftFeedback(null);
+    setWorkflowFeedback(null);
     setUploading(true);
 
     try {
       const response = await api.uploadImportFile({
         file,
-        targetTradeDate,
         mode: "DRAFT",
       });
-      setDraftFileName(file.name);
-      setSelectedDraftRowIds([]);
-      applyDraftSaved(createManualRowsFromPreview(response.rows), "文件已导入草稿");
+      setManualRows(createManualRowsFromPreview(response.rows, targetTradeDate));
+      setDraftSavedAt(currentDraftSavedAt());
+      setDraftFileName(response.fileName ?? file.name);
+      setValidationBatchIds(response.batchIds);
+      setIsDraftDirty(false);
+      setWorkflowFeedback({
+        tone: "success",
+        text: `文件已导入，共 ${response.rows.length} 条，已按挂单时间完成校验。`,
+      });
     } catch (error) {
-      setDraftFeedback({
+      setWorkflowFeedback({
         tone: "error",
         text: error instanceof Error ? error.message : "上传失败",
       });
@@ -1222,20 +2013,34 @@ function ImportTab({
       return;
     }
 
-    setDraftFeedback(null);
+    setWorkflowFeedback(null);
     setSavingDraft(true);
 
     try {
-      await api.previewImports({
-        targetTradeDate,
-        mode: "DRAFT",
-        sourceType: "MANUAL",
-        rows: normalizedManualRows,
+      const responses = await Promise.all(
+        manualRowsByTradeDate.map(async (group) => {
+          const response = await api.previewImports({
+            targetTradeDate: group.tradeDate,
+            mode: "DRAFT",
+            sourceType: "MANUAL",
+            fileName: draftFileName || undefined,
+            rows: group.items.map((item) => item.payload),
+          });
+          return {
+            tradeDate: group.tradeDate,
+            rowIds: group.items.map((item) => item.rowId),
+            batchId: response.batchId,
+            rows: response.rows,
+          };
+        }),
+      );
+      applyValidatedDrafts({
+        batches: responses,
+        fileName: draftFileName || undefined,
+        successText: "草稿已保存，并同步了最新校验结果。",
       });
-
-      applyDraftSaved(undefined, "草稿已保存");
     } catch (error) {
-      setDraftFeedback({
+      setWorkflowFeedback({
         tone: "error",
         text: error instanceof Error ? error.message : "保存草稿失败",
       });
@@ -1248,17 +2053,21 @@ function ImportTab({
     setDownloadingTemplate(true);
 
     try {
-      const blob = await api.downloadImportTemplate(targetTradeDate);
+      const templateTradeDate =
+        touchedManualRows[0]?.tradeDate?.trim() ||
+        manualRows[0]?.tradeDate?.trim() ||
+        targetTradeDate;
+      const blob = await api.downloadImportTemplate(templateTradeDate);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `import-template-${targetTradeDate}.xlsx`;
+      link.download = `import-template-${templateTradeDate}.xlsx`;
       document.body.append(link);
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
     } catch (error) {
-      setDraftFeedback({
+      setWorkflowFeedback({
         tone: "error",
         text: error instanceof Error ? error.message : "下载模板失败",
       });
@@ -1267,103 +2076,111 @@ function ImportTab({
     }
   }
 
-  function toggleDraftRowSelected(id: string, checked: boolean) {
-    setSelectedDraftRowIds((currentIds) => {
-      if (checked) {
-        return currentIds.includes(id) ? currentIds : [...currentIds, id];
-      }
-
-      return currentIds.filter((currentId) => currentId !== id);
-    });
-  }
-
-  async function handleValidateSelection() {
-    if (!canValidateSelection) {
+  async function handleValidateAll() {
+    if (!canValidateAll) {
       return;
     }
 
-    setValidationFeedback(null);
-    setValidatingSelection(true);
+    setWorkflowFeedback(null);
+    setValidatingAll(true);
 
     try {
-      const response = await api.previewImports({
-        targetTradeDate,
-        mode: "DRAFT",
-        sourceType: "MANUAL",
+      const responses = await Promise.all(
+        manualRowsByTradeDate.map(async (group) => {
+          const response = await api.previewImports({
+            targetTradeDate: group.tradeDate,
+            mode: "DRAFT",
+            sourceType: "MANUAL",
+            fileName: draftFileName || undefined,
+            rows: group.items.map((item) => item.payload),
+          });
+          return {
+            tradeDate: group.tradeDate,
+            rowIds: group.items.map((item) => item.rowId),
+            batchId: response.batchId,
+            rows: response.rows,
+          };
+        }),
+      );
+      applyValidatedDrafts({
+        batches: responses,
         fileName: draftFileName || undefined,
-        rows: selectedDraftRows.map((row) => ({
-          symbol: row.symbol.trim().toUpperCase(),
-          side: row.side,
-          price: parseManualNumber(row.price),
-          lots: parseManualNumber(row.lots),
-          validity: row.validity,
-        })),
-      });
-
-      setValidationBatchId(response.batchId);
-      onPreviewUpdate(response);
-      setValidationFeedback({
-        tone: "success",
-        text: `已校验 ${response.rows.length} 条，可在下方提交导入`,
+        successText: "已完成校验，可直接在当前表格继续修改。",
       });
     } catch (error) {
-      setValidationFeedback({
+      setWorkflowFeedback({
         tone: "error",
         text: error instanceof Error ? error.message : "校验失败",
       });
     } finally {
-      setValidatingSelection(false);
+      setValidatingAll(false);
     }
   }
 
   async function handleImportSubmit() {
-    if (!canSubmitImport || !validationBatchId || !isImportWindowOpen) {
+    if (!canSubmitImport || !isImportWindowOpen) {
       return;
     }
 
-    setValidationFeedback(null);
+    setWorkflowFeedback(null);
     setSubmittingImport(true);
 
+    let importedCount = 0;
     try {
-      const response = await api.commitImports({
-        batchId: validationBatchId,
-        mode: "APPEND",
+      for (const tradeDate of manualTradeDates) {
+        const batchId = validationBatchIds[tradeDate];
+        if (!batchId) {
+          continue;
+        }
+        const response = await api.commitImports({
+          batchId,
+          mode: "APPEND",
+        });
+        importedCount += response.importedCount;
+      }
+      resetManualRowsState();
+      setWorkflowFeedback({
+        tone: "success",
+        text: `已提交 ${importedCount} 条，已生成委托记录，可在下方查看状态。`,
       });
-      setValidationBatchId(null);
-      setSelectedDraftRowIds([]);
-      onPreviewUpdate(null);
-      setValidationFeedback({ tone: "success", text: `已提交 ${response.importedCount} 条` });
       await onImportCommitted();
     } catch (error) {
-      setValidationFeedback({
+      const message = error instanceof Error ? error.message : "提交导入失败";
+      if (message.includes("请重新校验")) {
+        resetValidationState();
+      }
+      setWorkflowFeedback({
         tone: "error",
-        text: error instanceof Error ? error.message : "提交导入失败",
+        text: importedCount > 0 ? `已提交 ${importedCount} 条，剩余提交失败：${message}` : message,
       });
     } finally {
       setSubmittingImport(false);
     }
   }
 
+  async function handleDeleteOrder(order: PendingOrderRow) {
+    if (!order.canDelete || deletingOrderId) {
+      return;
+    }
+
+    setDeletingOrderId(order.id);
+
+    try {
+      await api.deleteOrder(order.id);
+      await onImportCommitted();
+    } catch {
+      // Keep the operation-entry feedback area focused on import workflow actions.
+    } finally {
+      setDeletingOrderId(null);
+    }
+  }
+
   return (
     <section className="import-layout">
-      <div className="import-overview-card compact-import-overview">
-        <div className="import-overview-grid compact-import-summary-grid">
-          <div className="import-overview-item">
-            <span>目标交易日</span>
-            <strong>{targetTradeDate}</strong>
-          </div>
-          <div className="import-overview-item">
-            <span>市场状态</span>
-            <strong>{statusLabel(marketStatus)}</strong>
-          </div>
-        </div>
-      </div>
-
       <article className="input-card import-workflow-card">
         <div className="input-card-head import-toolbar-head">
           <div className="import-section-copy">
-            <h3>草稿</h3>
-            <p>文件导入后先进入草稿，确认无误后再选中进入下方校验。</p>
+            <h3>操作录入</h3>
           </div>
           <input
             ref={fileInputRef}
@@ -1389,11 +2206,34 @@ function ImportTab({
             </button>
           </div>
         </div>
+        {workflowFeedback ? (
+          <div
+            className={
+              workflowFeedback.tone === "error"
+                ? "import-feedback import-feedback-error"
+                : "import-feedback import-feedback-success"
+            }
+          >
+            {workflowFeedback.text}
+          </div>
+        ) : null}
         <div className="manual-grid-shell">
-          {draftFileName ? <div className="import-file-name">草稿来源：{draftFileName}</div> : null}
           <div className="manual-grid-head">
             <div className="import-draft-meta">
-              <span className="input-card-tag">已选中 {selectedDraftRows.length} 条完整草稿</span>
+              <span className="input-card-tag">待处理 {touchedManualRows.length} 条</span>
+              <span className="input-card-tag import-summary-tag import-summary-tag-valid">
+                通过 {previewValidCount}
+              </span>
+              <span className="input-card-tag import-summary-tag import-summary-tag-warning">
+                警告 {previewWarningCount}
+              </span>
+              <span className="input-card-tag import-summary-tag import-summary-tag-error">
+                错误 {previewErrorCount}
+              </span>
+              {draftSavedAt ? (
+                <span className="input-card-tag">最近保存 {draftSavedAt}</span>
+              ) : null}
+              {restoringDraft ? <span className="input-card-tag">正在恢复草稿...</span> : null}
             </div>
             <button
               type="button"
@@ -1406,51 +2246,32 @@ function ImportTab({
               +
             </button>
           </div>
-          <div className="manual-grid-layout">
-            <div className="manual-grid-table" role="table" aria-label="导入编辑表格">
-              <div className="manual-grid-header" role="row">
-                <div className="manual-select-cell">
-                  <input
-                    className="manual-select-checkbox"
-                    type="checkbox"
-                    checked={allDraftRowsSelected}
-                    disabled={isWorking || completeDraftRows.length === 0}
-                    onChange={(event) =>
-                      setSelectedDraftRowIds(
-                        event.target.checked ? completeDraftRows.map((row) => row.id) : [],
-                      )
-                    }
-                    aria-label="全选完整草稿行"
-                  />
-                </div>
-                <span>股票代码</span>
-                <span>方向</span>
-                <span>委托价</span>
-                <span>手数</span>
-                <span>有效期</span>
-              </div>
-              <div className="manual-grid-body">
-                {manualRows.map((row, index) => (
+          <div className="manual-grid-table" role="table" aria-label="导入编辑表格">
+            <div className="manual-grid-header manual-grid-header-expanded" role="row">
+              <span>行号</span>
+              <span>股票代码</span>
+              <span>方向</span>
+              <span>挂单时间</span>
+              <span>挂单方式</span>
+              <span>委托价</span>
+              <span>手数</span>
+              <span>校验结果</span>
+              <span>操作</span>
+            </div>
+            <div className="manual-grid-body">
+              {manualRows.map((row, index) => {
+                const validation = importRowValidationState(row, isDraftDirty);
+
+                return (
                   <div
                     key={row.id}
-                    className={`manual-grid-body-row${
-                      selectedDraftRowIdSet.has(row.id) ? " is-selected" : ""
+                    className={`manual-grid-body-row manual-grid-body-row-${
+                      row.validationStatus?.toLowerCase() ?? "pending"
                     }`}
                     role="row"
                   >
-                    <div className="manual-grid-row-fields">
-                      <div className="manual-select-cell">
-                        <input
-                          className="manual-select-checkbox"
-                          type="checkbox"
-                          checked={selectedDraftRowIdSet.has(row.id)}
-                          disabled={isWorking || !isManualRowComplete(row)}
-                          onChange={(event) =>
-                            toggleDraftRowSelected(row.id, event.target.checked)
-                          }
-                          aria-label={`选中第 ${index + 1} 行草稿`}
-                        />
-                      </div>
+                    <div className="manual-grid-row-fields manual-grid-row-fields-expanded">
+                      <span className="manual-row-number">{index + 1}</span>
                       <label className="manual-field">
                         <span className="sr-only">第 {index + 1} 行股票代码</span>
                         <input
@@ -1483,6 +2304,37 @@ function ImportTab({
                         </select>
                       </label>
                       <label className="manual-field">
+                        <span className="sr-only">第 {index + 1} 行挂单时间</span>
+                        <input
+                          type="date"
+                          value={row.tradeDate}
+                          disabled={isWorking}
+                          onChange={(event) =>
+                            updateManualRow(row.id, "tradeDate", event.target.value)
+                          }
+                        />
+                      </label>
+                      <label className="manual-field">
+                        <span className="sr-only">第 {index + 1} 行挂单方式</span>
+                        <select
+                          value={row.validity}
+                          disabled={isWorking}
+                          onChange={(event) =>
+                            updateManualRow(
+                              row.id,
+                              "validity",
+                              event.target.value as ManualImportRowInput["validity"],
+                            )
+                          }
+                        >
+                          {MANUAL_VALIDITY_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="manual-field">
                         <span className="sr-only">第 {index + 1} 行委托价</span>
                         <input
                           type="number"
@@ -1506,73 +2358,33 @@ function ImportTab({
                           placeholder="1"
                         />
                       </label>
-                      <label className="manual-field">
-                        <span className="sr-only">第 {index + 1} 行有效期</span>
-                        <select
-                          value={row.validity}
+                      <div className="manual-validation-cell">
+                        <span className={validation.badgeClassName}>{validation.label}</span>
+                        <div className="validation-note">{validation.message}</div>
+                      </div>
+                      <div className="manual-row-action-cell">
+                        <button
+                          type="button"
+                          className="manual-row-icon-button manual-row-icon-button-danger"
+                          onClick={() => removeManualRow(row.id)}
                           disabled={isWorking}
-                          onChange={(event) =>
-                            updateManualRow(
-                              row.id,
-                              "validity",
-                              event.target.value as ManualImportRowInput["validity"],
-                            )
-                          }
+                          aria-label={`删除第 ${index + 1} 行`}
+                          title="删除当前行"
                         >
-                          {MANUAL_VALIDITY_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
+                          -
+                        </button>
+                      </div>
                     </div>
                   </div>
-                ))}
-              </div>
-            </div>
-            <div className="manual-grid-action-rail" aria-label="删除操作">
-              <div className="manual-grid-action-rail-head" aria-hidden="true" />
-              <div className="manual-grid-action-rail-body">
-                {manualRows.map((row, index) => (
-                  <div key={`${row.id}-action`} className="manual-grid-action-item">
-                    <button
-                      type="button"
-                      className="manual-row-icon-button manual-row-icon-button-danger"
-                      onClick={() => removeManualRow(row.id)}
-                      disabled={isWorking}
-                      aria-label={`删除第 ${index + 1} 行`}
-                      title="删除当前行"
-                    >
-                      -
-                    </button>
-                  </div>
-                ))}
-              </div>
+                );
+              })}
             </div>
           </div>
         </div>
         <div className="import-submit-actions">
-          <div className="import-status-row">
-            <span
-              className={`import-status-note${
-                draftFeedback?.tone === "error"
-                  ? " is-error"
-                  : draftFeedback?.tone === "success"
-                    ? " is-success"
-                    : ""
-              }`}
-            >
-              {draftStatusText}
-            </span>
-          </div>
           <div className="button-row footer-actions">
-            <button
-              type="button"
-              onClick={resetManualRows}
-              disabled={isWorking}
-            >
-              清空输入
+            <button type="button" onClick={() => void handleClearManualRows()} disabled={isWorking}>
+              {clearingDraft ? "清空中..." : "清空草稿"}
             </button>
             <button
               type="button"
@@ -1583,46 +2395,10 @@ function ImportTab({
             </button>
             <button
               type="button"
-              onClick={() => void handleValidateSelection()}
-              disabled={isWorking || !canValidateSelection}
+              onClick={() => void handleValidateAll()}
+              disabled={isWorking || !canValidateAll}
             >
-              {validatingSelection ? "校验中..." : "选中的进入下方校验"}
-            </button>
-          </div>
-        </div>
-      </article>
-
-      <article className="input-card import-validation-card">
-        <div className="input-card-head">
-          <div className="import-section-copy">
-            <h3>校验与提交</h3>
-            <p>下方只展示已选中并进入校验的记录，提交导入也在这里完成。</p>
-          </div>
-        </div>
-        <div className="import-submit-actions">
-          <div className="import-status-row">
-            <span
-              className={`import-status-note${
-                validationFeedback?.tone === "error"
-                  ? " is-error"
-                  : validationFeedback?.tone === "success"
-                    ? " is-success"
-                    : ""
-              }`}
-            >
-              {validationStatusText}
-            </span>
-            {!isImportWindowOpen ? (
-              <span className="import-status-note">当前仅可保存草稿，暂不可提交导入</span>
-            ) : null}
-          </div>
-          <div className="button-row footer-actions">
-            <button
-              type="button"
-              onClick={resetValidationPreview}
-              disabled={isWorking || previewRows.length === 0}
-            >
-              清空校验
+              {validatingAll ? "校验中..." : "校验全部"}
             </button>
             <button
               type="button"
@@ -1633,29 +2409,115 @@ function ImportTab({
             </button>
           </div>
         </div>
-        {previewRows.length > 0 ? (
-          <DataTable
-            headers={["行号", "股票代码", "方向", "委托价", "手数", "有效期", "校验结果"]}
-            rows={previewRows.map((row) => (
-              <tr key={row.rowNumber}>
-                <td>{row.rowNumber}</td>
-                <td>{row.symbol}</td>
-                <td>{tradeSideLabel(row.side)}</td>
-                <td>{row.price.toFixed(2)}</td>
-                <td>{row.lots}</td>
-                <td>{validityLabel(row.validity)}</td>
-                <td>
-                  <span className={`status-pill validation-${row.validationStatus.toLowerCase()}`}>
-                    {row.validationStatus}
-                  </span>
-                  <div className="validation-note">{row.validationMessage}</div>
-                </td>
+      </article>
+
+      <article className="input-card import-workflow-card">
+        <div className="input-card-head import-toolbar-head">
+          <div className="import-section-copy">
+            <h3>委托记录</h3>
+          </div>
+          <div className="import-draft-meta">
+            <span className="input-card-tag">显示 {importOrders.length} 条</span>
+            <span className="input-card-tag">共 {pendingOrders.length} 条</span>
+          </div>
+        </div>
+        <div className="history-toolbar import-orders-toolbar">
+          <div className="history-filter-group">
+            <span className="history-toolbar-label">状态筛选</span>
+            <div className="history-mode-switch">
+              {IMPORT_ORDER_FILTER_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={
+                    orderFilter === option.value
+                      ? "history-mode-button active"
+                      : "history-mode-button"
+                  }
+                  onClick={() => setOrderFilter(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="history-toolbar-meta">
+            <span>
+              当前筛选:{" "}
+              {IMPORT_ORDER_FILTER_OPTIONS.find((item) => item.value === orderFilter)?.label}
+            </span>
+          </div>
+        </div>
+        <div className="table-wrap history-table-wrap">
+          <table className="history-table import-orders-table">
+            <thead>
+              <tr>
+                <th>挂单时间</th>
+                <th>股票代码</th>
+                <th>方向</th>
+                <th>挂单方式</th>
+                <th className="align-right">委托价</th>
+                <th className="align-right">手数</th>
+                <th className="align-right">股数</th>
+                <th>状态</th>
+                <th>状态说明</th>
+                <th>操作</th>
               </tr>
-            ))}
-          />
-        ) : (
-          <div className="empty-panel">草稿中选中完整记录后，点击“选中的进入下方校验”。</div>
-        )}
+            </thead>
+            <tbody>
+              {importOrders.length > 0 ? (
+                importOrders.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.tradeDate}</td>
+                    <td>{row.symbol}</td>
+                    <td>
+                      <span
+                        className={
+                          row.side === "BUY"
+                            ? "trade-side-pill trade-side-buy"
+                            : "trade-side-pill trade-side-sell"
+                        }
+                      >
+                        {tradeSideLabel(row.side)}
+                      </span>
+                    </td>
+                    <td>{orderValidityLabel(row.validity)}</td>
+                    <td className="number-cell">{row.orderPrice.toFixed(2)}</td>
+                    <td className="number-cell">{formatNumber(row.lots)}</td>
+                    <td className="number-cell">{formatNumber(row.shares)}</td>
+                    <td>
+                      <span className={`status-pill status-${row.status}`}>
+                        {orderStatusLabel(row.status)}
+                      </span>
+                    </td>
+                    <td>{row.statusMessage || "-"}</td>
+                    <td>
+                      {row.canDelete ? (
+                        <button
+                          type="button"
+                          className="order-delete-button"
+                          onClick={() => void handleDeleteOrder(row)}
+                          disabled={deletingOrderId !== null}
+                          title="撤回当前委托"
+                        >
+                          {deletingOrderId === row.id ? "撤单中..." : "撤单"}
+                        </button>
+                      ) : (
+                        <span className="order-delete-placeholder">-</span>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={10} className="empty-state">
+                    暂无委托记录
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </article>
     </section>
   );

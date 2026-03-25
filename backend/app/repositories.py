@@ -14,13 +14,14 @@ from .models import (
     CashLedger,
     DailyPnl,
     DailyPnlDetail,
-    DailyPrice,
+    EodPrice,
     ExecutionTrade,
     ImportBatch,
     ImportBatchItem,
     ImportBatchStatus,
     ImportMode,
     ImportSourceType,
+    IntradayQuote,
     InstructionOrder,
     OrderEvent,
     OrderSide,
@@ -28,7 +29,6 @@ from .models import (
     OrderValidity,
     PositionLot,
     PositionStatus,
-    QuoteSnapshot,
     User,
     ValidationStatus,
 )
@@ -49,17 +49,35 @@ class UserRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def get_or_create(self, user_id: str, name: str, initial_cash: float) -> User:
-        user = self.session.get(User, user_id)
-        if user:
-            return user
-        user = User(id=user_id, name=name, initial_cash=initial_cash)
+    def get(self, user_id: str) -> User | None:
+        return self.session.get(User, user_id)
+
+    def get_by_name(self, name: str) -> User | None:
+        stmt = select(User).where(User.name == name)
+        return self.session.scalar(stmt)
+
+    def create(
+        self, *, name: str, initial_cash: float, user_id: str | None = None
+    ) -> User:
+        user = User(id=user_id or new_id("usr"), name=name, initial_cash=initial_cash)
         self.session.add(user)
         self.session.flush()
         return user
 
-    def list_ids(self) -> list[str]:
-        return list(self.session.scalars(select(User.id).order_by(User.id)).all())
+    def list_users(self) -> list[User]:
+        stmt = select(User).order_by(User.created_at.asc(), User.id.asc())
+        return list(self.session.scalars(stmt).all())
+
+    def list_user_ids(self) -> list[str]:
+        stmt = select(User.id).order_by(User.created_at.asc(), User.id.asc())
+        return list(self.session.scalars(stmt).all())
+
+    def delete(self, user_id: str) -> None:
+        user = self.get(user_id)
+        if not user:
+            return
+        self.session.delete(user)
+        self.session.flush()
 
 
 class OrderRepository:
@@ -67,59 +85,102 @@ class OrderRepository:
         self.session = session
 
     def count_orders(self, user_id: str) -> int:
-        return self.session.scalar(select(func.count()).select_from(InstructionOrder).where(InstructionOrder.user_id == user_id)) or 0
+        return (
+            self.session.scalar(
+                select(func.count())
+                .select_from(InstructionOrder)
+                .where(InstructionOrder.user_id == user_id)
+            )
+            or 0
+        )
 
     def get_order(self, order_id: str) -> InstructionOrder | None:
         return self.session.get(InstructionOrder, order_id)
 
-    def list_orders(self, user_id: str, statuses: Iterable[OrderStatus] | None = None) -> list[InstructionOrder]:
+    def delete_order(self, order: InstructionOrder) -> None:
+        self.session.delete(order)
+        self.session.flush()
+
+    def list_orders(
+        self, user_id: str, statuses: Iterable[OrderStatus] | None = None
+    ) -> list[InstructionOrder]:
         stmt = select(InstructionOrder).where(InstructionOrder.user_id == user_id)
         if statuses:
             stmt = stmt.where(InstructionOrder.status.in_(list(statuses)))
-        stmt = stmt.options(selectinload(InstructionOrder.events), selectinload(InstructionOrder.trades)).order_by(InstructionOrder.updated_at.desc())
+        stmt = stmt.options(
+            selectinload(InstructionOrder.events), selectinload(InstructionOrder.trades)
+        ).order_by(InstructionOrder.updated_at.desc())
         return list(self.session.scalars(stmt).unique().all())
 
-    def list_pending_orders(self, user_id: str, trade_date: str) -> list[InstructionOrder]:
+    def list_pending_orders(
+        self, user_id: str, trade_date: str
+    ) -> list[InstructionOrder]:
         stmt = (
             select(InstructionOrder)
             .where(
                 InstructionOrder.user_id == user_id,
                 or_(
-                    and_(InstructionOrder.trade_date == trade_date, InstructionOrder.status.in_([OrderStatus.confirmed, OrderStatus.pending])),
-                    and_(InstructionOrder.validity == OrderValidity.GTC, InstructionOrder.status.in_([OrderStatus.confirmed, OrderStatus.pending])),
+                    and_(
+                        InstructionOrder.trade_date == trade_date,
+                        InstructionOrder.status.in_(
+                            [OrderStatus.confirmed, OrderStatus.pending]
+                        ),
+                    ),
+                    and_(
+                        InstructionOrder.validity == OrderValidity.GTC,
+                        InstructionOrder.status.in_(
+                            [OrderStatus.confirmed, OrderStatus.pending]
+                        ),
+                    ),
                 ),
             )
             .order_by(InstructionOrder.created_at.asc())
         )
         return list(self.session.scalars(stmt).all())
 
-    def list_conflict_sell_orders(self, user_id: str, trade_date: str) -> list[InstructionOrder]:
+    def list_conflict_sell_orders(
+        self, user_id: str, trade_date: str
+    ) -> list[InstructionOrder]:
         stmt = (
             select(InstructionOrder)
             .where(
                 InstructionOrder.user_id == user_id,
                 InstructionOrder.side == OrderSide.SELL,
-                InstructionOrder.status.in_([OrderStatus.confirmed, OrderStatus.pending]),
-                or_(InstructionOrder.trade_date == trade_date, InstructionOrder.validity == OrderValidity.GTC),
+                InstructionOrder.status.in_(
+                    [OrderStatus.confirmed, OrderStatus.pending]
+                ),
+                or_(
+                    InstructionOrder.trade_date == trade_date,
+                    InstructionOrder.validity == OrderValidity.GTC,
+                ),
             )
             .order_by(InstructionOrder.created_at.asc())
         )
         return list(self.session.scalars(stmt).all())
 
-    def list_day_orders_to_expire(self, user_id: str, trade_date: str) -> list[InstructionOrder]:
+    def list_day_orders_to_expire(
+        self, user_id: str, trade_date: str
+    ) -> list[InstructionOrder]:
         stmt = select(InstructionOrder).where(
             InstructionOrder.user_id == user_id,
             InstructionOrder.trade_date == trade_date,
             InstructionOrder.validity == OrderValidity.DAY,
-            InstructionOrder.status.in_([OrderStatus.confirmed, OrderStatus.pending, OrderStatus.triggered]),
+            InstructionOrder.status.in_(
+                [OrderStatus.confirmed, OrderStatus.pending, OrderStatus.triggered]
+            ),
         )
         return list(self.session.scalars(stmt).all())
 
-    def list_confirmed_orders(self, user_id: str, trade_date: str) -> list[InstructionOrder]:
+    def list_confirmed_orders(
+        self, user_id: str, trade_date: str
+    ) -> list[InstructionOrder]:
         stmt = select(InstructionOrder).where(
             InstructionOrder.user_id == user_id,
             InstructionOrder.status == OrderStatus.confirmed,
-            or_(InstructionOrder.trade_date == trade_date, InstructionOrder.validity == OrderValidity.GTC),
+            or_(
+                InstructionOrder.trade_date == trade_date,
+                InstructionOrder.validity == OrderValidity.GTC,
+            ),
         )
         return list(self.session.scalars(stmt).all())
 
@@ -135,7 +196,7 @@ class OrderRepository:
         lots: int,
         validity: str,
         status: str = "confirmed",
-        status_reason: str = "已导入待执行",
+        status_reason: str = "待执行",
         created_at: datetime | None = None,
     ) -> InstructionOrder:
         now = created_at or datetime.now()
@@ -159,7 +220,13 @@ class OrderRepository:
         self.session.flush()
         return order
 
-    def add_event(self, order_id: str, event_type: str, message: str, event_time: datetime | None = None) -> OrderEvent:
+    def add_event(
+        self,
+        order_id: str,
+        event_type: str,
+        message: str,
+        event_time: datetime | None = None,
+    ) -> OrderEvent:
         event = OrderEvent(
             id=new_id("evt"),
             order_id=order_id,
@@ -226,12 +293,34 @@ class OrderRepository:
         self.session.flush()
         return trade
 
-    def latest_import_batches(self, user_id: str, trade_date: str | None = None) -> list[ImportBatch]:
+    def latest_import_batches(
+        self, user_id: str, trade_date: str | None = None
+    ) -> list[ImportBatch]:
         stmt = select(ImportBatch).where(ImportBatch.user_id == user_id)
         if trade_date:
             stmt = stmt.where(ImportBatch.target_trade_date == trade_date)
-        stmt = stmt.options(selectinload(ImportBatch.items)).order_by(ImportBatch.created_at.desc()).limit(5)
+        stmt = (
+            stmt.options(selectinload(ImportBatch.items))
+            .order_by(ImportBatch.created_at.desc())
+            .limit(5)
+        )
         return list(self.session.scalars(stmt).unique().all())
+
+    def delete_draft_import_batches(self, user_id: str, trade_date: str) -> int:
+        stmt = (
+            select(ImportBatch)
+            .where(
+                ImportBatch.user_id == user_id,
+                ImportBatch.target_trade_date == trade_date,
+                ImportBatch.mode == ImportMode.DRAFT,
+            )
+            .options(selectinload(ImportBatch.items))
+        )
+        batches = list(self.session.scalars(stmt).unique().all())
+        for batch in batches:
+            self.session.delete(batch)
+        self.session.flush()
+        return len(batches)
 
     def create_import_batch(
         self,
@@ -273,17 +362,28 @@ class OrderRepository:
         return batch
 
     def get_import_batch(self, batch_id: str) -> ImportBatch | None:
-        stmt = select(ImportBatch).where(ImportBatch.id == batch_id).options(selectinload(ImportBatch.items))
+        stmt = (
+            select(ImportBatch)
+            .where(ImportBatch.id == batch_id)
+            .options(selectinload(ImportBatch.items))
+        )
         return self.session.scalar(stmt)
 
     def commit_import_batch(self, batch: ImportBatch, mode: str) -> int:
         if mode == ImportMode.OVERWRITE.value:
-            self.session.execute(delete(InstructionOrder).where(InstructionOrder.user_id == batch.user_id, InstructionOrder.trade_date == batch.target_trade_date))
+            self.session.execute(
+                delete(InstructionOrder).where(
+                    InstructionOrder.user_id == batch.user_id,
+                    InstructionOrder.trade_date == batch.target_trade_date,
+                )
+            )
         imported_count = 0
         if mode != ImportMode.DRAFT.value:
+            if any(
+                item.validation_status == ValidationStatus.ERROR for item in batch.items
+            ):
+                raise ValueError("导入批次校验已变化，请重新校验后再提交")
             for item in batch.items:
-                if item.validation_status == ValidationStatus.ERROR:
-                    continue
                 self.create_order(
                     user_id=batch.user_id,
                     trade_date=batch.target_trade_date,
@@ -295,7 +395,11 @@ class OrderRepository:
                     validity=item.validity.value,
                 )
                 imported_count += 1
-        batch.status = ImportBatchStatus.VALIDATED if mode == ImportMode.DRAFT.value else ImportBatchStatus.COMMITTED
+        batch.status = (
+            ImportBatchStatus.VALIDATED
+            if mode == ImportMode.DRAFT.value
+            else ImportBatchStatus.COMMITTED
+        )
         batch.mode = ImportMode(mode)
         self.session.flush()
         return imported_count
@@ -305,7 +409,9 @@ class PortfolioRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def latest_cash(self, user_id: str, before: datetime | None = None) -> CashLedger | None:
+    def latest_cash(
+        self, user_id: str, before: datetime | None = None
+    ) -> CashLedger | None:
         stmt = select(CashLedger).where(CashLedger.user_id == user_id)
         if before is not None:
             stmt = stmt.where(CashLedger.entry_time <= before)
@@ -338,14 +444,20 @@ class PortfolioRepository:
         return row
 
     def open_lots(self, user_id: str, symbol: str | None = None) -> list[PositionLot]:
-        stmt = select(PositionLot).where(PositionLot.user_id == user_id, PositionLot.status == PositionStatus.OPEN)
+        stmt = select(PositionLot).where(
+            PositionLot.user_id == user_id, PositionLot.status == PositionStatus.OPEN
+        )
         if symbol:
             stmt = stmt.where(PositionLot.symbol == symbol)
         stmt = stmt.order_by(PositionLot.opened_at.asc())
         return list(self.session.scalars(stmt).all())
 
     def all_lots(self, user_id: str) -> list[PositionLot]:
-        stmt = select(PositionLot).where(PositionLot.user_id == user_id).order_by(PositionLot.opened_at.asc())
+        stmt = (
+            select(PositionLot)
+            .where(PositionLot.user_id == user_id)
+            .order_by(PositionLot.opened_at.asc())
+        )
         return list(self.session.scalars(stmt).all())
 
     def create_position_lot(
@@ -382,31 +494,54 @@ class PortfolioRepository:
         self.session.flush()
         return lot
 
-    def update_lot(self, lot: PositionLot, *, remaining_shares: int, sellable_shares: int, closed_at: datetime | None = None) -> None:
+    def update_lot(
+        self,
+        lot: PositionLot,
+        *,
+        remaining_shares: int,
+        sellable_shares: int,
+        closed_at: datetime | None = None,
+    ) -> None:
         lot.remaining_shares = remaining_shares
         lot.sellable_shares = sellable_shares
-        lot.status = PositionStatus.CLOSED if remaining_shares == 0 else PositionStatus.OPEN
+        lot.status = (
+            PositionStatus.CLOSED if remaining_shares == 0 else PositionStatus.OPEN
+        )
         lot.closed_at = closed_at if remaining_shares == 0 else None
         self.session.flush()
 
     def unlock_previous_lots(self, user_id: str, trade_date: str) -> None:
-        stmt = select(PositionLot).where(PositionLot.user_id == user_id, PositionLot.status == PositionStatus.OPEN, PositionLot.opened_date < trade_date)
+        stmt = select(PositionLot).where(
+            PositionLot.user_id == user_id,
+            PositionLot.status == PositionStatus.OPEN,
+            PositionLot.opened_date < trade_date,
+        )
         for row in self.session.scalars(stmt).all():
             row.sellable_shares = row.remaining_shares
         self.session.flush()
 
-    def get_pending_sell_orders_by_symbol(self, user_id: str) -> dict[str, list[InstructionOrder]]:
-        stmt = select(InstructionOrder).where(
-            InstructionOrder.user_id == user_id,
-            InstructionOrder.side == OrderSide.SELL,
-            InstructionOrder.status.in_([OrderStatus.confirmed, OrderStatus.pending, OrderStatus.triggered]),
-        ).order_by(InstructionOrder.created_at.asc())
+    def get_pending_sell_orders_by_symbol(
+        self, user_id: str
+    ) -> dict[str, list[InstructionOrder]]:
+        stmt = (
+            select(InstructionOrder)
+            .where(
+                InstructionOrder.user_id == user_id,
+                InstructionOrder.side == OrderSide.SELL,
+                InstructionOrder.status.in_(
+                    [OrderStatus.confirmed, OrderStatus.pending, OrderStatus.triggered]
+                ),
+            )
+            .order_by(InstructionOrder.created_at.asc())
+        )
         grouped: dict[str, list[InstructionOrder]] = defaultdict(list)
         for row in self.session.scalars(stmt).all():
             grouped[row.symbol].append(row)
         return grouped
 
-    def get_available_sellable_shares(self, user_id: str, exclude_order_id: str | None = None) -> SellAvailability:
+    def get_available_sellable_shares(
+        self, user_id: str, exclude_order_id: str | None = None
+    ) -> SellAvailability:
         sellable_by_symbol: dict[str, int] = defaultdict(int)
         for lot in self.open_lots(user_id):
             sellable_by_symbol[lot.symbol] += lot.sellable_shares
@@ -414,7 +549,9 @@ class PortfolioRepository:
         reserved_stmt = select(InstructionOrder.symbol, InstructionOrder.shares).where(
             InstructionOrder.user_id == user_id,
             InstructionOrder.side == OrderSide.SELL,
-            InstructionOrder.status.in_([OrderStatus.confirmed, OrderStatus.pending, OrderStatus.triggered]),
+            InstructionOrder.status.in_(
+                [OrderStatus.confirmed, OrderStatus.pending, OrderStatus.triggered]
+            ),
         )
         if exclude_order_id:
             reserved_stmt = reserved_stmt.where(InstructionOrder.id != exclude_order_id)
@@ -422,63 +559,137 @@ class PortfolioRepository:
         for symbol, shares in self.session.execute(reserved_stmt).all():
             reserved_by_symbol[symbol] += shares
 
-        available_by_symbol = {symbol: max(0, sellable_by_symbol.get(symbol, 0) - reserved_by_symbol.get(symbol, 0)) for symbol in sellable_by_symbol}
-        return SellAvailability(dict(sellable_by_symbol), dict(reserved_by_symbol), available_by_symbol)
+        available_by_symbol = {
+            symbol: max(
+                0, sellable_by_symbol.get(symbol, 0) - reserved_by_symbol.get(symbol, 0)
+            )
+            for symbol in sellable_by_symbol
+        }
+        return SellAvailability(
+            dict(sellable_by_symbol), dict(reserved_by_symbol), available_by_symbol
+        )
 
 
 class MarketDataRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def get_daily_price(self, symbol: str, trade_date: str) -> DailyPrice | None:
-        stmt = select(DailyPrice).where(DailyPrice.symbol == symbol, DailyPrice.trade_date == trade_date)
-        return self.session.scalar(stmt)
+    def delete_intraday_quotes(
+        self, *, symbols: list[str] | None = None, trade_dates: list[str] | None = None
+    ) -> None:
+        stmt = delete(IntradayQuote)
+        if symbols:
+            stmt = stmt.where(IntradayQuote.symbol.in_(symbols))
+        if trade_dates:
+            stmt = stmt.where(IntradayQuote.trade_date.in_(trade_dates))
+        self.session.execute(stmt)
+        self.session.flush()
 
-    def upsert_quote_snapshot(self, row: dict) -> QuoteSnapshot:
-        stmt = select(QuoteSnapshot).where(QuoteSnapshot.symbol == row["symbol"])
+    def delete_eod_prices(
+        self, *, symbols: list[str] | None = None, trade_dates: list[str] | None = None
+    ) -> None:
+        stmt = delete(EodPrice)
+        if symbols:
+            stmt = stmt.where(EodPrice.symbol.in_(symbols))
+        if trade_dates:
+            stmt = stmt.where(EodPrice.trade_date.in_(trade_dates))
+        self.session.execute(stmt)
+        self.session.flush()
+
+    def append_intraday_quote(self, row: dict) -> IntradayQuote:
+        stmt = select(IntradayQuote).where(
+            IntradayQuote.symbol == row["symbol"],
+            IntradayQuote.quoted_at == row["quoted_at"],
+        )
         existing = self.session.scalar(stmt)
         if existing:
             existing.symbol_name = row["name"]
+            existing.trade_date = row["trade_date"]
             existing.price = row["price"]
             existing.open_price = row["open"]
             existing.previous_close = row["previousClose"]
             existing.high_price = row["high"]
             existing.low_price = row["low"]
-            existing.updated_at = row["updated_at"]
             existing.source = row.get("source")
+            existing.ingested_at = datetime.now()
             self.session.flush()
             return existing
-        snapshot = QuoteSnapshot(
-            id=new_id("quote"),
+
+        quote = IntradayQuote(
+            id=new_id("iq"),
             symbol=row["symbol"],
             symbol_name=row["name"],
+            trade_date=row["trade_date"],
+            quoted_at=row["quoted_at"],
             price=row["price"],
             open_price=row["open"],
             previous_close=row["previousClose"],
             high_price=row["high"],
             low_price=row["low"],
-            updated_at=row["updated_at"],
             source=row.get("source"),
         )
-        self.session.add(snapshot)
+        self.session.add(quote)
         self.session.flush()
-        return snapshot
+        return quote
 
-    def list_quotes(self, symbols: list[str] | None = None) -> list[QuoteSnapshot]:
-        stmt = select(QuoteSnapshot)
+    def latest_intraday_quote(
+        self, symbol: str, trade_date: str | None = None
+    ) -> IntradayQuote | None:
+        stmt = select(IntradayQuote).where(IntradayQuote.symbol == symbol)
+        if trade_date:
+            stmt = stmt.where(IntradayQuote.trade_date == trade_date)
+        stmt = stmt.order_by(IntradayQuote.quoted_at.desc(), IntradayQuote.id.desc())
+        return self.session.scalar(stmt)
+
+    def list_latest_intraday_quotes(
+        self, symbols: list[str] | None = None, trade_date: str | None = None
+    ) -> list[IntradayQuote]:
         if symbols:
-            stmt = stmt.where(QuoteSnapshot.symbol.in_(symbols))
-        stmt = stmt.order_by(QuoteSnapshot.symbol.asc())
-        return list(self.session.scalars(stmt).all())
+            normalized = sorted(set(symbols))
+        else:
+            symbol_stmt = select(IntradayQuote.symbol)
+            if trade_date:
+                symbol_stmt = symbol_stmt.where(IntradayQuote.trade_date == trade_date)
+            normalized = sorted(set(self.session.scalars(symbol_stmt).all()))
+        rows: list[IntradayQuote] = []
+        for symbol in normalized:
+            quote = self.latest_intraday_quote(symbol, trade_date)
+            if quote:
+                rows.append(quote)
+        return rows
 
-    def get_quote(self, symbol: str) -> QuoteSnapshot | None:
-        return self.session.scalar(select(QuoteSnapshot).where(QuoteSnapshot.symbol == symbol))
+    def latest_intraday_updated_at(
+        self, trade_date: str | None = None
+    ) -> datetime | None:
+        stmt = select(func.max(IntradayQuote.quoted_at))
+        if trade_date:
+            stmt = stmt.where(IntradayQuote.trade_date == trade_date)
+        return self.session.scalar(stmt)
 
-    def latest_quote_updated_at(self) -> datetime | None:
-        return self.session.scalar(select(func.max(QuoteSnapshot.updated_at)))
+    def get_eod_price(self, symbol: str, trade_date: str) -> EodPrice | None:
+        stmt = select(EodPrice).where(
+            EodPrice.symbol == symbol, EodPrice.trade_date == trade_date
+        )
+        return self.session.scalar(stmt)
 
-    def upsert_daily_price(self, *, symbol: str, symbol_name: str | None, trade_date: str, close_price: float, open_price: float = 0, previous_close: float = 0, high_price: float = 0, low_price: float = 0, is_final: bool = True, source: str | None = None) -> DailyPrice:
-        stmt = select(DailyPrice).where(DailyPrice.symbol == symbol, DailyPrice.trade_date == trade_date)
+    def upsert_eod_price(
+        self,
+        *,
+        symbol: str,
+        symbol_name: str | None,
+        trade_date: str,
+        close_price: float,
+        open_price: float = 0,
+        previous_close: float = 0,
+        high_price: float = 0,
+        low_price: float = 0,
+        is_final: bool = True,
+        source: str | None = None,
+        published_at: datetime | None = None,
+    ) -> EodPrice:
+        stmt = select(EodPrice).where(
+            EodPrice.symbol == symbol, EodPrice.trade_date == trade_date
+        )
         existing = self.session.scalar(stmt)
         if existing:
             existing.symbol_name = symbol_name
@@ -489,11 +700,13 @@ class MarketDataRepository:
             existing.low_price = low_price
             existing.is_final = is_final
             existing.source = source
+            existing.published_at = published_at or existing.published_at
             existing.updated_at = datetime.now()
             self.session.flush()
             return existing
-        row = DailyPrice(
-            id=new_id("dpx"),
+
+        row = EodPrice(
+            id=new_id("eod"),
             symbol=symbol,
             symbol_name=symbol_name,
             trade_date=trade_date,
@@ -504,28 +717,35 @@ class MarketDataRepository:
             low_price=low_price,
             is_final=is_final,
             source=source,
+            published_at=published_at or datetime.now(),
         )
         self.session.add(row)
         self.session.flush()
         return row
 
-    def latest_daily_price(self, symbol: str, trade_date_lte: str | None = None) -> DailyPrice | None:
-        stmt = select(DailyPrice).where(DailyPrice.symbol == symbol)
+    def latest_eod_price(
+        self, symbol: str, trade_date_lte: str | None = None
+    ) -> EodPrice | None:
+        stmt = select(EodPrice).where(EodPrice.symbol == symbol)
         if trade_date_lte:
-            stmt = stmt.where(DailyPrice.trade_date <= trade_date_lte)
-        stmt = stmt.order_by(DailyPrice.trade_date.desc())
+            stmt = stmt.where(EodPrice.trade_date <= trade_date_lte)
+        stmt = stmt.order_by(EodPrice.trade_date.desc())
         return self.session.scalar(stmt)
 
-    def previous_daily_price(self, symbol: str, trade_date: str) -> DailyPrice | None:
+    def previous_eod_price(self, symbol: str, trade_date: str) -> EodPrice | None:
         stmt = (
-            select(DailyPrice)
-            .where(DailyPrice.symbol == symbol, DailyPrice.trade_date < trade_date)
-            .order_by(DailyPrice.trade_date.desc())
+            select(EodPrice)
+            .where(EodPrice.symbol == symbol, EodPrice.trade_date < trade_date)
+            .order_by(EodPrice.trade_date.desc())
         )
         return self.session.scalar(stmt)
 
-    def list_daily_prices(self, trade_date: str) -> list[DailyPrice]:
-        stmt = select(DailyPrice).where(DailyPrice.trade_date == trade_date).order_by(DailyPrice.symbol.asc())
+    def list_eod_prices(self, trade_date: str) -> list[EodPrice]:
+        stmt = (
+            select(EodPrice)
+            .where(EodPrice.trade_date == trade_date)
+            .order_by(EodPrice.symbol.asc())
+        )
         return list(self.session.scalars(stmt).all())
 
 
@@ -534,34 +754,70 @@ class PnlRepository:
         self.session = session
 
     def get_daily_pnl(self, user_id: str, trade_date: str) -> DailyPnl | None:
-        stmt = select(DailyPnl).where(DailyPnl.user_id == user_id, DailyPnl.trade_date == trade_date).options(selectinload(DailyPnl.details))
+        stmt = (
+            select(DailyPnl)
+            .where(DailyPnl.user_id == user_id, DailyPnl.trade_date == trade_date)
+            .options(selectinload(DailyPnl.details))
+        )
         return self.session.scalar(stmt)
 
     def latest_daily_pnl(self, user_id: str) -> DailyPnl | None:
-        stmt = select(DailyPnl).where(DailyPnl.user_id == user_id).options(selectinload(DailyPnl.details)).order_by(DailyPnl.trade_date.desc())
+        stmt = (
+            select(DailyPnl)
+            .where(DailyPnl.user_id == user_id)
+            .options(selectinload(DailyPnl.details))
+            .order_by(DailyPnl.trade_date.desc())
+        )
         return self.session.scalar(stmt)
 
     def previous_daily_pnl(self, user_id: str, trade_date: str) -> DailyPnl | None:
-        stmt = select(DailyPnl).where(DailyPnl.user_id == user_id, DailyPnl.trade_date < trade_date).options(selectinload(DailyPnl.details)).order_by(DailyPnl.trade_date.desc())
+        stmt = (
+            select(DailyPnl)
+            .where(DailyPnl.user_id == user_id, DailyPnl.trade_date < trade_date)
+            .options(selectinload(DailyPnl.details))
+            .order_by(DailyPnl.trade_date.desc())
+        )
         return self.session.scalar(stmt)
 
     def first_daily_pnl(self, user_id: str) -> DailyPnl | None:
-        stmt = select(DailyPnl).where(DailyPnl.user_id == user_id).order_by(DailyPnl.trade_date.asc())
+        stmt = (
+            select(DailyPnl)
+            .where(DailyPnl.user_id == user_id)
+            .order_by(DailyPnl.trade_date.asc())
+        )
         return self.session.scalar(stmt)
 
     def list_calendar_rows(self, user_id: str) -> list[DailyPnl]:
-        stmt = select(DailyPnl).where(DailyPnl.user_id == user_id).order_by(DailyPnl.trade_date.asc())
+        stmt = (
+            select(DailyPnl)
+            .where(DailyPnl.user_id == user_id)
+            .order_by(DailyPnl.trade_date.asc())
+        )
         return list(self.session.scalars(stmt).all())
 
     def list_detail_rows(self, user_id: str, trade_date: str) -> list[DailyPnlDetail]:
         daily = self.get_daily_pnl(user_id, trade_date)
         return sorted(daily.details, key=lambda row: row.symbol) if daily else []
 
-    def upsert_daily_pnl(self, *, user_id: str, trade_date: str, payload: dict, is_final: bool) -> DailyPnl:
+    def list_non_final_trade_dates(
+        self, user_id: str, before_trade_date: str | None = None
+    ) -> list[str]:
+        stmt = select(DailyPnl.trade_date).where(
+            DailyPnl.user_id == user_id, DailyPnl.is_final.is_(False)
+        )
+        if before_trade_date:
+            stmt = stmt.where(DailyPnl.trade_date < before_trade_date)
+        stmt = stmt.order_by(DailyPnl.trade_date.asc())
+        return list(self.session.scalars(stmt).all())
+
+    def upsert_daily_pnl(
+        self, *, user_id: str, trade_date: str, payload: dict, is_final: bool
+    ) -> DailyPnl:
         row = self.get_daily_pnl(user_id, trade_date)
         if row:
-            for detail in list(row.details):
-                self.session.delete(detail)
+            self.session.execute(
+                delete(DailyPnlDetail).where(DailyPnlDetail.daily_pnl_id == row.id)
+            )
             row.total_assets = payload["totalAssets"]
             row.available_cash = payload["availableCash"]
             row.position_market_value = payload["positionMarketValue"]
@@ -595,25 +851,27 @@ class PnlRepository:
             self.session.flush()
 
         for detail in payload["details"]:
-            self.session.add(DailyPnlDetail(
-                id=new_id("pnld"),
-                daily_pnl_id=row.id,
-                trade_date=trade_date,
-                symbol=detail["symbol"],
-                symbol_name=detail["symbolName"],
-                opening_shares=detail["openingShares"],
-                closing_shares=detail["closingShares"],
-                buy_shares=detail["buyShares"],
-                sell_shares=detail["sellShares"],
-                buy_price=detail["buyPrice"],
-                sell_price=detail["sellPrice"],
-                open_price=detail["openPrice"],
-                close_price=detail["closePrice"],
-                realized_pnl=detail["realizedPnl"],
-                unrealized_pnl=detail["unrealizedPnl"],
-                daily_pnl=detail["dailyPnl"],
-                daily_return=detail["dailyReturn"],
-            ))
+            self.session.add(
+                DailyPnlDetail(
+                    id=new_id("pnld"),
+                    daily_pnl_id=row.id,
+                    trade_date=trade_date,
+                    symbol=detail["symbol"],
+                    symbol_name=detail["symbolName"],
+                    opening_shares=detail["openingShares"],
+                    closing_shares=detail["closingShares"],
+                    buy_shares=detail["buyShares"],
+                    sell_shares=detail["sellShares"],
+                    buy_price=detail["buyPrice"],
+                    sell_price=detail["sellPrice"],
+                    open_price=detail["openPrice"],
+                    close_price=detail["closePrice"],
+                    realized_pnl=detail["realizedPnl"],
+                    unrealized_pnl=detail["unrealizedPnl"],
+                    daily_pnl=detail["dailyPnl"],
+                    daily_return=detail["dailyReturn"],
+                )
+            )
         self.session.flush()
         self.session.refresh(row)
         return row

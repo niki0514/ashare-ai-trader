@@ -15,26 +15,28 @@ from .db import SessionLocal
 from .import_io import build_import_template, parse_import_file
 from .import_service import ImportService
 from .market import market_clock
-from .models import User
-from .repositories import OrderRepository, PortfolioRepository, UserRepository
+from .repositories import OrderRepository
 from .schemas import (
     CommitImportsRequest,
+    CreateUserRequest,
     DashboardResponse,
+    DeleteOrderResponse,
     ImportCommitResponse,
     ImportPreviewResponse,
+    ImportUploadResponse,
     PreviewImportsRequest,
     QuoteResponse,
+    UserSummary,
 )
-from .seed_data import SEED_CLOSE_PRICES
 from .services import (
-    PnlService,
+    OrderService,
     QueryService,
     QuoteService,
-    SeedService,
     run_engine_tick_once,
     start_engine_if_needed,
     stop_engine_if_needed,
 )
+from .user_service import UserService
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -69,22 +71,42 @@ def get_db() -> Iterator[Session]:
         session.close()
 
 
+def _serialize_user(user) -> UserSummary:
+    return UserSummary(
+        id=user.id,
+        name=user.name,
+        initialCash=user.initial_cash,
+        createdAt=user.created_at.isoformat(),
+        updatedAt=user.updated_at.isoformat(),
+    )
+
+
 def get_user_id(x_user_id: str | None = Header(default=None), db: Session = Depends(get_db)) -> str:
-    user_id = (x_user_id or settings.default_user_id).strip() or settings.default_user_id
-    user_repo = UserRepository(db)
-    user = user_repo.get_or_create(user_id, settings.default_user_name, settings.initial_cash)
-    portfolio_repo = PortfolioRepository(db)
-    if portfolio_repo.latest_cash(user_id) is None:
-        portfolio_repo.add_cash_entry(
-            user_id=user_id,
-            entry_time=datetime.now(),
-            entry_type="INITIAL",
-            amount=user.initial_cash,
-            balance_after=user.initial_cash,
-            reference_type="UserBootstrap",
+    try:
+        return UserService(db).resolve_user_id(x_user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/users")
+def list_users(db: Session = Depends(get_db)):
+    rows = UserService(db).list_users()
+    return {"rows": [_serialize_user(user) for user in rows]}
+
+
+@app.post("/api/users", response_model=UserSummary)
+def create_user(payload: CreateUserRequest, db: Session = Depends(get_db)):
+    try:
+        user = UserService(db).create_user(
+            name=payload.name,
+            initial_cash=payload.initialCash,
         )
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 409 if detail == "User name already exists" else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
     db.commit()
-    return user_id
+    return _serialize_user(user)
 
 
 @app.get("/api/dashboard", response_model=DashboardResponse)
@@ -100,6 +122,18 @@ def get_positions(db: Session = Depends(get_db), user_id: str = Depends(get_user
 @app.get("/api/orders/pending")
 def get_pending_orders(db: Session = Depends(get_db), user_id: str = Depends(get_user_id)):
     return {"rows": QueryService(db).get_pending_orders(user_id)}
+
+
+@app.delete("/api/orders/{order_id}", response_model=DeleteOrderResponse)
+def delete_order(order_id: str, db: Session = Depends(get_db), user_id: str = Depends(get_user_id)):
+    try:
+        deleted_id = OrderService(db).delete_order(user_id, order_id)
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 404 if detail == "委托不存在" else 409
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    db.commit()
+    return {"deletedId": deleted_id}
 
 
 @app.get("/api/history")
@@ -122,6 +156,7 @@ def preview_imports(payload: PreviewImportsRequest, db: Session = Depends(get_db
     rows = [
         {
             "rowNumber": idx + 1,
+            "tradeDate": payload.targetTradeDate,
             "symbol": row.symbol,
             "side": row.side,
             "price": row.price,
@@ -144,9 +179,8 @@ def preview_imports(payload: PreviewImportsRequest, db: Session = Depends(get_db
     return result
 
 
-@app.post("/api/imports/upload", response_model=ImportPreviewResponse)
+@app.post("/api/imports/upload", response_model=ImportUploadResponse)
 async def upload_import_file(
-    targetTradeDate: str = Form(...),
     mode: str = Form("DRAFT"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -157,16 +191,34 @@ async def upload_import_file(
         parsed = parse_import_file(file.filename or "upload.xlsx", content)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    result = ImportService(db).create_import_preview(
-        user_id=user_id,
-        target_trade_date=targetTradeDate,
-        source_type=parsed.source_type,
-        file_name=file.filename,
-        mode=mode,
-        rows=parsed.rows,
-    )
+
+    grouped_rows: dict[str, list[dict]] = {}
+    for row in parsed.rows:
+        grouped_rows.setdefault(row["tradeDate"], []).append(row)
+
+    preview_rows: list[dict] = []
+    batch_ids: dict[str, str] = {}
+    import_service = ImportService(db)
+    for trade_date in sorted(grouped_rows):
+        result = import_service.create_import_preview(
+            user_id=user_id,
+            target_trade_date=trade_date,
+            source_type=parsed.source_type,
+            file_name=file.filename,
+            mode=mode,
+            rows=grouped_rows[trade_date],
+        )
+        batch_ids[trade_date] = result["batchId"]
+        preview_rows.extend(result["rows"])
+
     db.commit()
-    return result
+    preview_rows.sort(key=lambda row: row["rowNumber"])
+    return {
+        "fileName": file.filename,
+        "sourceType": parsed.source_type,
+        "batchIds": batch_ids,
+        "rows": preview_rows,
+    }
 
 
 @app.get("/api/imports/template")
@@ -180,12 +232,12 @@ def download_import_template(targetTradeDate: str | None = None):
 @app.post("/api/imports/commit", response_model=ImportCommitResponse)
 def commit_imports(payload: CommitImportsRequest, db: Session = Depends(get_db), user_id: str = Depends(get_user_id)):
     if not market_clock.is_import_window_open():
-        raise HTTPException(status_code=403, detail="仅允许在交易所收盘后或开盘前提交导入")
+        raise HTTPException(status_code=403, detail="当前为休市日，仅允许在交易日提交导入")
     try:
         result = ImportService(db).commit_import_batch(user_id, payload.batchId, payload.mode)
     except ValueError as exc:
         detail = str(exc)
-        status_code = 409 if detail == "Import batch already committed" else 404
+        status_code = 404 if detail == "Import batch not found" else 409
         raise HTTPException(status_code=status_code, detail=detail) from exc
     db.commit()
     return result
@@ -223,6 +275,17 @@ def latest_imports(tradeDate: str = Query(default=""), db: Session = Depends(get
     return {"rows": output}
 
 
+@app.delete("/api/imports/draft")
+def clear_import_drafts(
+    tradeDate: str = Query(...),
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    deleted_count = OrderRepository(db).delete_draft_import_batches(user_id, tradeDate)
+    db.commit()
+    return {"deletedCount": deleted_count}
+
+
 @app.get("/api/quotes", response_model=QuoteResponse)
 async def get_quotes(
     symbols: str = Query(default=""),
@@ -256,44 +319,3 @@ async def get_quotes(
 async def dev_tick():
     processed = await run_engine_tick_once()
     return {"processed": processed, "updatedAt": datetime.now().isoformat()}
-
-
-@app.post("/api/dev/reset-demo")
-def reset_demo(db: Session = Depends(get_db)):
-    from .models import (
-        CashLedger,
-        DailyPnl,
-        DailyPnlDetail,
-        DailyPrice,
-        ExecutionTrade,
-        ImportBatch,
-        ImportBatchItem,
-        InstructionOrder,
-        OrderEvent,
-        PositionLot,
-        QuoteSnapshot,
-    )
-
-    for model in [
-        OrderEvent,
-        ExecutionTrade,
-        InstructionOrder,
-        PositionLot,
-        CashLedger,
-        DailyPnlDetail,
-        DailyPnl,
-        DailyPrice,
-        QuoteSnapshot,
-        ImportBatchItem,
-        ImportBatch,
-        User,
-    ]:
-        db.query(model).delete()
-
-    seed = SeedService(db)
-    seed.ensure_seed_data(settings.default_user_id)
-    pnl_service = PnlService(db)
-    for day in sorted(SEED_CLOSE_PRICES.keys()):
-        pnl_service.recompute_daily_pnl(settings.default_user_id, day, use_realtime=False, is_final=True)
-    db.commit()
-    return {"message": "demo reset complete"}

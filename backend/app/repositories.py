@@ -32,6 +32,7 @@ from .models import (
     User,
     ValidationStatus,
 )
+from .time_utils import market_now
 
 
 def new_id(prefix: str) -> str:
@@ -43,6 +44,30 @@ class SellAvailability:
     sellable_by_symbol: dict[str, int]
     reserved_by_symbol: dict[str, int]
     available_by_symbol: dict[str, int]
+
+
+EXECUTABLE_ORDER_STATUSES = (OrderStatus.confirmed, OrderStatus.pending)
+ACTIVE_ORDER_STATUSES = (
+    OrderStatus.confirmed,
+    OrderStatus.pending,
+    OrderStatus.triggered,
+)
+
+
+def effective_order_clause(trade_date: str):
+    return or_(
+        InstructionOrder.trade_date == trade_date,
+        and_(
+            InstructionOrder.validity == OrderValidity.GTC,
+            InstructionOrder.trade_date < trade_date,
+        ),
+    )
+
+
+def is_order_effective_on_trade_date(order: InstructionOrder, trade_date: str) -> bool:
+    return order.trade_date == trade_date or (
+        order.validity == OrderValidity.GTC and order.trade_date < trade_date
+    )
 
 
 class UserRepository:
@@ -119,20 +144,8 @@ class OrderRepository:
             select(InstructionOrder)
             .where(
                 InstructionOrder.user_id == user_id,
-                or_(
-                    and_(
-                        InstructionOrder.trade_date == trade_date,
-                        InstructionOrder.status.in_(
-                            [OrderStatus.confirmed, OrderStatus.pending]
-                        ),
-                    ),
-                    and_(
-                        InstructionOrder.validity == OrderValidity.GTC,
-                        InstructionOrder.status.in_(
-                            [OrderStatus.confirmed, OrderStatus.pending]
-                        ),
-                    ),
-                ),
+                InstructionOrder.status.in_(EXECUTABLE_ORDER_STATUSES),
+                effective_order_clause(trade_date),
             )
             .order_by(InstructionOrder.created_at.asc())
         )
@@ -146,13 +159,8 @@ class OrderRepository:
             .where(
                 InstructionOrder.user_id == user_id,
                 InstructionOrder.side == OrderSide.SELL,
-                InstructionOrder.status.in_(
-                    [OrderStatus.confirmed, OrderStatus.pending]
-                ),
-                or_(
-                    InstructionOrder.trade_date == trade_date,
-                    InstructionOrder.validity == OrderValidity.GTC,
-                ),
+                InstructionOrder.status.in_(EXECUTABLE_ORDER_STATUSES),
+                effective_order_clause(trade_date),
             )
             .order_by(InstructionOrder.created_at.asc())
         )
@@ -177,10 +185,7 @@ class OrderRepository:
         stmt = select(InstructionOrder).where(
             InstructionOrder.user_id == user_id,
             InstructionOrder.status == OrderStatus.confirmed,
-            or_(
-                InstructionOrder.trade_date == trade_date,
-                InstructionOrder.validity == OrderValidity.GTC,
-            ),
+            effective_order_clause(trade_date),
         )
         return list(self.session.scalars(stmt).all())
 
@@ -199,7 +204,7 @@ class OrderRepository:
         status_reason: str = "待执行",
         created_at: datetime | None = None,
     ) -> InstructionOrder:
-        now = created_at or datetime.now()
+        now = created_at or market_now()
         order = InstructionOrder(
             id=new_id("ord"),
             user_id=user_id,
@@ -231,7 +236,7 @@ class OrderRepository:
             id=new_id("evt"),
             order_id=order_id,
             event_type=OrderStatus(event_type),
-            event_time=event_time or datetime.now(),
+            event_time=event_time or market_now(),
             message=message,
         )
         self.session.add(event)
@@ -249,7 +254,7 @@ class OrderRepository:
     ) -> None:
         order.status = OrderStatus(status)
         order.status_reason = status_reason
-        order.updated_at = datetime.now()
+        order.updated_at = market_now()
         if triggered_at is not None:
             order.triggered_at = triggered_at
         if filled_at is not None:
@@ -349,6 +354,7 @@ class OrderRepository:
                 batch_id=batch.id,
                 row_number=row["rowNumber"],
                 symbol=row["symbol"],
+                symbol_name=row.get("name"),
                 side=OrderSide(row["side"]),
                 limit_price=row["price"],
                 lots=row["lots"],
@@ -375,6 +381,7 @@ class OrderRepository:
                 delete(InstructionOrder).where(
                     InstructionOrder.user_id == batch.user_id,
                     InstructionOrder.trade_date == batch.target_trade_date,
+                    InstructionOrder.status.in_(ACTIVE_ORDER_STATUSES),
                 )
             )
         imported_count = 0
@@ -388,7 +395,7 @@ class OrderRepository:
                     user_id=batch.user_id,
                     trade_date=batch.target_trade_date,
                     symbol=item.symbol,
-                    symbol_name=None,
+                    symbol_name=item.symbol_name,
                     side=item.side.value,
                     limit_price=item.limit_price,
                     lots=item.lots,
@@ -418,6 +425,15 @@ class PortfolioRepository:
         stmt = stmt.order_by(CashLedger.entry_time.desc())
         return self.session.scalar(stmt)
 
+    def cash_balance(self, user_id: str, before: datetime | None = None) -> float:
+        stmt = select(func.coalesce(func.sum(CashLedger.amount), 0.0)).where(
+            CashLedger.user_id == user_id
+        )
+        if before is not None:
+            stmt = stmt.where(CashLedger.entry_time <= before)
+        total = self.session.scalar(stmt)
+        return float(total or 0.0)
+
     def add_cash_entry(
         self,
         *,
@@ -425,7 +441,6 @@ class PortfolioRepository:
         entry_time: datetime,
         entry_type: str,
         amount: float,
-        balance_after: float,
         reference_id: str | None = None,
         reference_type: str | None = None,
     ) -> CashLedger:
@@ -435,7 +450,6 @@ class PortfolioRepository:
             entry_time=entry_time,
             entry_type=CashEntryType(entry_type),
             amount=amount,
-            balance_after=balance_after,
             reference_id=reference_id,
             reference_type=reference_type,
         )
@@ -521,16 +535,15 @@ class PortfolioRepository:
         self.session.flush()
 
     def get_pending_sell_orders_by_symbol(
-        self, user_id: str
+        self, user_id: str, trade_date: str
     ) -> dict[str, list[InstructionOrder]]:
         stmt = (
             select(InstructionOrder)
             .where(
                 InstructionOrder.user_id == user_id,
                 InstructionOrder.side == OrderSide.SELL,
-                InstructionOrder.status.in_(
-                    [OrderStatus.confirmed, OrderStatus.pending, OrderStatus.triggered]
-                ),
+                InstructionOrder.status.in_(ACTIVE_ORDER_STATUSES),
+                effective_order_clause(trade_date),
             )
             .order_by(InstructionOrder.created_at.asc())
         )
@@ -540,7 +553,10 @@ class PortfolioRepository:
         return grouped
 
     def get_available_sellable_shares(
-        self, user_id: str, exclude_order_id: str | None = None
+        self,
+        user_id: str,
+        trade_date: str,
+        exclude_order_id: str | None = None,
     ) -> SellAvailability:
         sellable_by_symbol: dict[str, int] = defaultdict(int)
         for lot in self.open_lots(user_id):
@@ -549,9 +565,8 @@ class PortfolioRepository:
         reserved_stmt = select(InstructionOrder.symbol, InstructionOrder.shares).where(
             InstructionOrder.user_id == user_id,
             InstructionOrder.side == OrderSide.SELL,
-            InstructionOrder.status.in_(
-                [OrderStatus.confirmed, OrderStatus.pending, OrderStatus.triggered]
-            ),
+            InstructionOrder.status.in_(ACTIVE_ORDER_STATUSES),
+            effective_order_clause(trade_date),
         )
         if exclude_order_id:
             reserved_stmt = reserved_stmt.where(InstructionOrder.id != exclude_order_id)
@@ -611,7 +626,7 @@ class MarketDataRepository:
             existing.high_price = row["high"]
             existing.low_price = row["low"]
             existing.source = row.get("source")
-            existing.ingested_at = datetime.now()
+            existing.ingested_at = market_now()
             self.session.flush()
             return existing
 
@@ -644,19 +659,36 @@ class MarketDataRepository:
     def list_latest_intraday_quotes(
         self, symbols: list[str] | None = None, trade_date: str | None = None
     ) -> list[IntradayQuote]:
+        latest_rows = (
+            select(
+                IntradayQuote.id,
+                func.row_number()
+                .over(
+                    partition_by=IntradayQuote.symbol,
+                    order_by=(
+                        IntradayQuote.quoted_at.desc(),
+                        IntradayQuote.id.desc(),
+                    ),
+                )
+                .label("row_number"),
+            )
+        )
         if symbols:
-            normalized = sorted(set(symbols))
-        else:
-            symbol_stmt = select(IntradayQuote.symbol)
-            if trade_date:
-                symbol_stmt = symbol_stmt.where(IntradayQuote.trade_date == trade_date)
-            normalized = sorted(set(self.session.scalars(symbol_stmt).all()))
-        rows: list[IntradayQuote] = []
-        for symbol in normalized:
-            quote = self.latest_intraday_quote(symbol, trade_date)
-            if quote:
-                rows.append(quote)
-        return rows
+            latest_rows = latest_rows.where(IntradayQuote.symbol.in_(sorted(set(symbols))))
+        if trade_date:
+            latest_rows = latest_rows.where(IntradayQuote.trade_date == trade_date)
+
+        latest_rows_subquery = latest_rows.subquery()
+        stmt = (
+            select(IntradayQuote)
+            .join(
+                latest_rows_subquery,
+                IntradayQuote.id == latest_rows_subquery.c.id,
+            )
+            .where(latest_rows_subquery.c.row_number == 1)
+            .order_by(IntradayQuote.symbol.asc())
+        )
+        return list(self.session.scalars(stmt).all())
 
     def latest_intraday_updated_at(
         self, trade_date: str | None = None
@@ -701,7 +733,7 @@ class MarketDataRepository:
             existing.is_final = is_final
             existing.source = source
             existing.published_at = published_at or existing.published_at
-            existing.updated_at = datetime.now()
+            existing.updated_at = market_now()
             self.session.flush()
             return existing
 
@@ -717,7 +749,7 @@ class MarketDataRepository:
             low_price=low_price,
             is_final=is_final,
             source=source,
-            published_at=published_at or datetime.now(),
+            published_at=published_at or market_now(),
         )
         self.session.add(row)
         self.session.flush()
@@ -761,13 +793,23 @@ class PnlRepository:
         )
         return self.session.scalar(stmt)
 
-    def latest_daily_pnl(self, user_id: str) -> DailyPnl | None:
+    def latest_daily_pnl(
+        self,
+        user_id: str,
+        *,
+        before_trade_date: str | None = None,
+        final_only: bool = False,
+    ) -> DailyPnl | None:
         stmt = (
             select(DailyPnl)
             .where(DailyPnl.user_id == user_id)
             .options(selectinload(DailyPnl.details))
             .order_by(DailyPnl.trade_date.desc())
         )
+        if before_trade_date:
+            stmt = stmt.where(DailyPnl.trade_date <= before_trade_date)
+        if final_only:
+            stmt = stmt.where(DailyPnl.is_final.is_(True))
         return self.session.scalar(stmt)
 
     def previous_daily_pnl(self, user_id: str, trade_date: str) -> DailyPnl | None:
@@ -787,12 +829,14 @@ class PnlRepository:
         )
         return self.session.scalar(stmt)
 
-    def list_calendar_rows(self, user_id: str) -> list[DailyPnl]:
+    def list_calendar_rows(self, user_id: str, *, final_only: bool = True) -> list[DailyPnl]:
         stmt = (
             select(DailyPnl)
             .where(DailyPnl.user_id == user_id)
             .order_by(DailyPnl.trade_date.asc())
         )
+        if final_only:
+            stmt = stmt.where(DailyPnl.is_final.is_(True))
         return list(self.session.scalars(stmt).all())
 
     def list_detail_rows(self, user_id: str, trade_date: str) -> list[DailyPnlDetail]:
@@ -828,7 +872,7 @@ class PnlRepository:
             row.sell_amount = payload["sellAmount"]
             row.trade_count = payload["tradeCount"]
             row.is_final = is_final
-            row.computed_at = datetime.now()
+            row.computed_at = market_now()
             self.session.flush()
         else:
             row = DailyPnl(
@@ -845,7 +889,7 @@ class PnlRepository:
                 sell_amount=payload["sellAmount"],
                 trade_count=payload["tradeCount"],
                 is_final=is_final,
-                computed_at=datetime.now(),
+                computed_at=market_now(),
             )
             self.session.add(row)
             self.session.flush()
@@ -866,8 +910,6 @@ class PnlRepository:
                     sell_price=detail["sellPrice"],
                     open_price=detail["openPrice"],
                     close_price=detail["closePrice"],
-                    realized_pnl=detail["realizedPnl"],
-                    unrealized_pnl=detail["unrealizedPnl"],
                     daily_pnl=detail["dailyPnl"],
                     daily_return=detail["dailyReturn"],
                 )

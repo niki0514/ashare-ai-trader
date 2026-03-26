@@ -6,9 +6,17 @@ import re
 
 from sqlalchemy.orm import Session
 
+from .market import market_clock
+from .market_prices import trade_date_of
 from .models import ImportBatchStatus, OrderStatus, ValidationStatus
-from .quote_client import TencentQuoteClient, to_quote_symbol
-from .repositories import MarketDataRepository, OrderRepository, PortfolioRepository
+from .quote_client import TencentQuoteClient, from_quote_symbol, to_quote_symbol
+from .repositories import (
+    ACTIVE_ORDER_STATUSES,
+    MarketDataRepository,
+    OrderRepository,
+    PortfolioRepository,
+    is_order_effective_on_trade_date,
+)
 
 
 SYMBOL_PATTERN = re.compile(r"^\d{6}$")
@@ -34,11 +42,19 @@ class ImportService:
             output.append(next_row)
         return output
 
-    @staticmethod
-    def _symbol_from_quote_symbol(symbol: str) -> str:
-        if symbol.startswith(("sh", "sz", "bj")):
-            return symbol[2:]
-        return symbol
+    def apply_trade_date_checks(self, target_trade_date: str, rows: list[dict]) -> list[dict]:
+        trade_date_error = market_clock.validate_import_trade_date(target_trade_date)
+        if not trade_date_error:
+            return rows
+
+        output: list[dict] = []
+        for row in rows:
+            next_row = dict(row)
+            if row["validationStatus"] != "ERROR":
+                next_row["validationStatus"] = "ERROR"
+                next_row["validationMessage"] = trade_date_error
+            output.append(next_row)
+        return output
 
     @staticmethod
     def _limit_ratio(symbol: str, symbol_name: str | None) -> Decimal:
@@ -55,32 +71,40 @@ class ImportService:
     def _round_cny(value: Decimal) -> Decimal:
         return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-    def _price_reference_by_symbol(self, target_trade_date: str, symbols: list[str]) -> dict[str, dict[str, float | str]]:
-        references: dict[str, dict[str, float | str]] = {}
+    def _market_snapshot_by_symbol(
+        self,
+        target_trade_date: str,
+        symbols: list[str],
+        *,
+        allow_remote_fetch: bool = False,
+    ) -> dict[str, dict[str, float | str]]:
+        snapshots: dict[str, dict[str, float | str]] = {}
         missing_symbols: list[str] = []
         for symbol in symbols:
             latest_eod = self.market_repo.latest_eod_price(symbol, trade_date_lte=target_trade_date)
-            if latest_eod and latest_eod.close_price > 0:
-                references[symbol] = {
-                    "name": latest_eod.symbol_name or symbol,
-                    "referenceClose": latest_eod.close_price,
-                }
-                continue
+            snapshot = snapshots.setdefault(symbol, {})
+            if latest_eod:
+                if latest_eod.symbol_name:
+                    snapshot["name"] = latest_eod.symbol_name
+                    snapshot["source"] = "eod"
+                if latest_eod.close_price > 0:
+                    snapshot["referenceClose"] = latest_eod.close_price
 
             quote = self.market_repo.latest_intraday_quote(to_quote_symbol(symbol))
-            if quote and quote.previous_close > 0:
-                references[symbol] = {
-                    "name": quote.symbol_name or symbol,
-                    "referenceClose": quote.previous_close,
-                }
-                continue
+            if quote:
+                if quote.symbol_name and "name" not in snapshot:
+                    snapshot["name"] = quote.symbol_name
+                    snapshot["source"] = "intraday"
+                if quote.previous_close > 0 and "referenceClose" not in snapshot:
+                    snapshot["referenceClose"] = quote.previous_close
 
-            missing_symbols.append(symbol)
+            if allow_remote_fetch and ("name" not in snapshot or "referenceClose" not in snapshot):
+                missing_symbols.append(symbol)
 
-        if missing_symbols:
+        if allow_remote_fetch and missing_symbols:
             try:
                 fetched_rows = self.quote_client.fetch_quotes_sync(
-                    [to_quote_symbol(symbol) for symbol in missing_symbols]
+                    [to_quote_symbol(symbol) for symbol in sorted(set(missing_symbols))]
                 )
             except Exception:
                 fetched_rows = []
@@ -91,7 +115,7 @@ class ImportService:
                     {
                         "symbol": row.symbol,
                         "name": row.name,
-                        "trade_date": quoted_at.date().isoformat(),
+                        "trade_date": trade_date_of(quoted_at) or target_trade_date,
                         "price": row.price,
                         "open": row.open_price,
                         "previousClose": row.previous_close,
@@ -101,16 +125,82 @@ class ImportService:
                         "source": "tencent_preview_validation",
                     }
                 )
-                symbol = self._symbol_from_quote_symbol(row.symbol)
+                symbol = from_quote_symbol(row.symbol)
+                snapshot = snapshots.setdefault(symbol, {})
+                if row.name:
+                    snapshot["name"] = row.name
+                    snapshot["source"] = "quote"
                 if row.previous_close > 0:
-                    references[symbol] = {
-                        "name": row.name or symbol,
-                        "referenceClose": row.previous_close,
-                    }
+                    snapshot["referenceClose"] = row.previous_close
 
-        return references
+        return snapshots
 
-    def apply_price_limit_checks(self, target_trade_date: str, rows: list[dict]) -> list[dict]:
+    def _attach_symbol_names(self, target_trade_date: str, rows: list[dict]) -> list[dict]:
+        symbols = sorted(
+            {
+                str(row["symbol"])
+                for row in rows
+                if SYMBOL_PATTERN.fullmatch(str(row["symbol"]))
+            }
+        )
+        snapshots = self._market_snapshot_by_symbol(
+            target_trade_date,
+            symbols,
+            allow_remote_fetch=False,
+        )
+        output: list[dict] = []
+        for row in rows:
+            next_row = dict(row)
+            symbol = str(row["symbol"])
+            next_row["name"] = str(
+                snapshots.get(symbol, {}).get("name") or row.get("name") or symbol
+            )
+            output.append(next_row)
+        return output
+
+    def resolve_symbols(
+        self,
+        *,
+        target_trade_date: str,
+        symbols: list[str],
+    ) -> list[dict]:
+        normalized_symbols = sorted(
+            {
+                str(symbol).strip().upper()
+                for symbol in symbols
+                if SYMBOL_PATTERN.fullmatch(str(symbol).strip().upper())
+            }
+        )
+        snapshots = self._market_snapshot_by_symbol(
+            target_trade_date,
+            normalized_symbols,
+            allow_remote_fetch=True,
+        )
+        rows: list[dict] = []
+        for symbol in normalized_symbols:
+            snapshot = snapshots.get(symbol, {})
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "name": str(snapshot.get("name") or ""),
+                    "resolved": bool(snapshot.get("name")),
+                    "previousClose": (
+                        float(snapshot["referenceClose"])
+                        if "referenceClose" in snapshot
+                        else None
+                    ),
+                    "source": str(snapshot.get("source") or "unknown"),
+                }
+            )
+        return rows
+
+    def apply_price_limit_checks(
+        self,
+        target_trade_date: str,
+        rows: list[dict],
+        *,
+        allow_remote_fetch: bool = False,
+    ) -> list[dict]:
         symbols = sorted(
             {
                 row["symbol"]
@@ -118,19 +208,23 @@ class ImportService:
                 if row["validationStatus"] != "ERROR" and SYMBOL_PATTERN.fullmatch(str(row["symbol"]))
             }
         )
-        references = self._price_reference_by_symbol(target_trade_date, symbols)
+        snapshots = self._market_snapshot_by_symbol(
+            target_trade_date,
+            symbols,
+            allow_remote_fetch=allow_remote_fetch,
+        )
         output: list[dict] = []
         for row in rows:
             next_row = dict(row)
             if row["validationStatus"] != "ERROR":
                 symbol = str(row["symbol"])
-                reference = references.get(symbol)
-                if not reference:
+                snapshot = snapshots.get(symbol)
+                if not snapshot or "referenceClose" not in snapshot:
                     next_row["validationStatus"] = "WARNING"
                     next_row["validationMessage"] = "暂未获取到昨收盘口径，未校验涨跌停区间"
                 else:
-                    reference_close = Decimal(str(reference["referenceClose"]))
-                    ratio = self._limit_ratio(symbol, str(reference.get("name", "")))
+                    reference_close = Decimal(str(snapshot["referenceClose"]))
+                    ratio = self._limit_ratio(symbol, str(snapshot.get("name", "")))
                     lower = self._round_cny(reference_close * (Decimal("1") - ratio))
                     upper = self._round_cny(reference_close * (Decimal("1") + ratio))
                     price = Decimal(str(row["price"]))
@@ -145,8 +239,13 @@ class ImportService:
     def _active_orders(self, user_id: str, target_trade_date: str, mode: str):
         orders = self.order_repo.list_orders(
             user_id,
-            statuses=[OrderStatus.confirmed, OrderStatus.pending, OrderStatus.triggered],
+            statuses=ACTIVE_ORDER_STATUSES,
         )
+        orders = [
+            order
+            for order in orders
+            if is_order_effective_on_trade_date(order, target_trade_date)
+        ]
         if mode == "OVERWRITE":
             return [order for order in orders if order.trade_date != target_trade_date]
         return orders
@@ -213,8 +312,7 @@ class ImportService:
         mode: str,
         rows: list[dict],
     ) -> list[dict]:
-        latest_cash = self.portfolio_repo.latest_cash(user_id)
-        available_cash = latest_cash.balance_after if latest_cash else 0.0
+        available_cash = self.portfolio_repo.cash_balance(user_id)
         active_buy_amount = 0.0
         for order in self._active_orders(user_id, target_trade_date, mode):
             if order.side.value == "BUY":
@@ -248,9 +346,16 @@ class ImportService:
         target_trade_date: str,
         mode: str,
         rows: list[dict],
+        *,
+        allow_remote_fetch: bool = False,
     ) -> list[dict]:
-        checked_rows = self.apply_symbol_format_checks(rows)
-        checked_rows = self.apply_price_limit_checks(target_trade_date, checked_rows)
+        checked_rows = self.apply_trade_date_checks(target_trade_date, rows)
+        checked_rows = self.apply_symbol_format_checks(checked_rows)
+        checked_rows = self.apply_price_limit_checks(
+            target_trade_date,
+            checked_rows,
+            allow_remote_fetch=allow_remote_fetch,
+        )
         checked_rows = self.apply_sell_conflict_checks(user_id, target_trade_date, mode, checked_rows)
         return self.apply_buy_cash_checks(user_id, target_trade_date, mode, checked_rows)
 
@@ -262,6 +367,7 @@ class ImportService:
                     "rowNumber": item.row_number,
                     "tradeDate": batch.target_trade_date,
                     "symbol": item.symbol,
+                    "name": item.symbol_name,
                     "side": item.side.value,
                     "price": item.limit_price,
                     "lots": item.lots,
@@ -276,6 +382,9 @@ class ImportService:
         rows_by_number = {row["rowNumber"]: row for row in rows}
         for item in batch.items:
             latest = rows_by_number[item.row_number]
+            latest_name = latest.get("name")
+            if latest_name:
+                item.symbol_name = latest_name
             item.validation_status = ValidationStatus(latest["validationStatus"])
             item.validation_message = latest["validationMessage"]
         self.session.flush()
@@ -290,7 +399,14 @@ class ImportService:
         mode: str,
         rows: list[dict],
     ) -> dict:
-        checked_rows = self.apply_preview_checks(user_id, target_trade_date, mode, rows)
+        checked_rows = self.apply_preview_checks(
+            user_id,
+            target_trade_date,
+            mode,
+            rows,
+            allow_remote_fetch=False,
+        )
+        checked_rows = self._attach_symbol_names(target_trade_date, checked_rows)
         preview_rows = [{**row, "tradeDate": target_trade_date} for row in checked_rows]
         batch = self.order_repo.create_import_batch(
             user_id=user_id,
@@ -319,6 +435,7 @@ class ImportService:
             batch.target_trade_date,
             mode,
             self._rows_from_batch(batch),
+            allow_remote_fetch=False,
         )
         self._update_batch_validation(batch, revalidated_rows)
         if mode != "DRAFT" and any(row["validationStatus"] == "ERROR" for row in revalidated_rows):

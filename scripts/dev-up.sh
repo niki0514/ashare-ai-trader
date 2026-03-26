@@ -51,10 +51,17 @@ wait_for_postgres() {
   exit 1
 }
 
+init_backend_schema() {
+  (
+    cd "$BACKEND_DIR"
+    uv run python -m devtools.schema init
+  )
+}
+
 start_backend() {
   (
     cd "$BACKEND_DIR"
-    exec uv run python -m app
+    exec env ASHARE_RELOAD=true uv run python -m app
   ) &
   BACKEND_PID=$!
 }
@@ -107,11 +114,8 @@ echo "Starting PostgreSQL container..."
 echo "Waiting for PostgreSQL to become healthy..."
 wait_for_postgres
 
-echo "Bootstrapping database schema..."
-(
-  cd "$BACKEND_DIR"
-  uv run python -m app.bootstrap
-)
+echo "Ensuring backend schema exists..."
+init_backend_schema
 
 echo "Starting backend on http://localhost:3101 ..."
 start_backend
@@ -119,5 +123,5 @@ start_backend
 echo "Starting frontend on http://localhost:5174 ..."
 start_frontend
 
-echo "Stack is starting. Press Ctrl+C to stop frontend and backend."
+echo "Stack is starting in hot-reload mode. Press Ctrl+C to stop frontend and backend."
 monitor_processes

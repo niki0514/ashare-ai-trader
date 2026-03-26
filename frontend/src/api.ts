@@ -1,5 +1,6 @@
 import type {
   CalendarDay,
+  ClosedPositionRow,
   DailyPnlDetailRow,
   DashboardResponse,
   HistoryRow,
@@ -9,7 +10,7 @@ import type {
   LatestImportBatch,
   PendingOrderRow,
   PositionRow,
-  QuoteResponse,
+  ResolvedSymbolRow,
   UserSummary,
 } from "./types";
 
@@ -150,6 +151,7 @@ export const api = {
     }),
   getDashboard: () => request<DashboardResponse>("/dashboard"),
   getPositions: () => request<{ rows: PositionRow[] }>("/positions"),
+  getClosedPositions: () => request<{ rows: ClosedPositionRow[] }>("/positions/closed"),
   getPendingOrders: () => request<{ rows: PendingOrderRow[] }>("/orders/pending"),
   deleteOrder: (orderId: string) =>
     request<{ deletedId: string }>(`/orders/${encodeURIComponent(orderId)}`, {
@@ -168,6 +170,11 @@ export const api = {
     request<ImportPreviewResponse>("/imports/preview", {
       method: "POST",
       body: JSON.stringify(payload)
+    }),
+  resolveSymbols: (payload: { targetTradeDate: string; symbols: string[] }) =>
+    request<{ rows: ResolvedSymbolRow[] }>("/symbols/resolve", {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
   uploadImportFile: (payload: { file: File; mode?: ImportMode }) => {
     const formData = new FormData();
@@ -205,5 +212,4 @@ export const api = {
         method: "DELETE",
       },
     ),
-  getQuotes: (symbols: string[]) => request<QuoteResponse>(`/quotes?symbols=${symbols.join(",")}`)
 };

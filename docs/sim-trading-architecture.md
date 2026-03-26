@@ -19,6 +19,7 @@ Real-time quotes use Tencent Finance quote endpoints.
 - Poll window: only during A-share market sessions
 - No polling before open, during non-trading hours, or after close
 - Recommended access mode: frontend calls backend proxy, backend calls Tencent API
+- Historical daily bars and EOD settlement use raw prices (`bfq`), not qfq-adjusted prices
 
 ### Market Sessions
 
@@ -29,6 +30,7 @@ China timezone (`Asia/Shanghai`):
 - `13:00:00 - 15:00:00`: trading
 - before `09:30:00` or after `15:00:00`: no polling
 - weekends: no polling
+- official holidays: no polling
 
 ## Frontend Information Architecture
 
@@ -49,7 +51,7 @@ China timezone (`Asia/Shanghai`):
 
 1. `Positions`
    - current holdings only
-   - fields: symbol, name, shares, sellable shares, cost, last price, market value, unrealized PnL, return rate
+   - fields: symbol, name, shares, sellable shares, diluted cost, last price, market value, cumulative PnL, return rate, today PnL
 2. `Today Orders`
    - today's instructions and real-time status transitions
 3. `History Ledger`
@@ -115,6 +117,8 @@ Core fields:
 - `side`
 - `order_price`
 - `fill_price`
+- `cost_basis_amount`
+- `realized_pnl`
 - `lots`
 - `shares`
 - `fill_time`
@@ -161,12 +165,11 @@ Core fields:
 - `entry_time`
 - `entry_type` (`INITIAL`, `BUY`, `SELL`, `MANUAL_ADJUSTMENT`)
 - `amount`
-- `balance_after`
 - `reference_id`
 - `reference_type`
 - `note`
 
-Supports global header metrics.
+Global header metrics should be computed from `amount` over time, not from write-time balance snapshots.
 
 ### 6. `daily_pnl`
 
@@ -188,6 +191,14 @@ Core fields:
 
 Supports tabs: `Daily PnL`, global header
 
+Settlement rules:
+
+- Trading session may compute temporary metrics, but does not persist `daily_pnl`
+- Lunch break persists a non-final snapshot for the current trade date
+- Market close persists the final snapshot for the current trade date
+- Weekend and holiday sessions do not create `daily_pnl` rows for that date
+- Query-side reads may self-heal missing lunch/close snapshots by running the same settlement path used by the engine
+
 ### 7. `daily_pnl_details`
 
 Stores per-symbol detail for a selected day.
@@ -198,12 +209,22 @@ Core fields:
 - `trade_date`
 - `symbol`
 - `symbol_name`
+- `opening_shares`
 - `closing_shares`
+- `buy_shares`
+- `sell_shares`
+- `buy_price`
+- `sell_price`
+- `open_price`
 - `close_price`
 - `daily_pnl`
 - `daily_return`
 
 Supports tab: `Daily PnL`
+
+Design note:
+
+- Daily detail exposes only the unified per-symbol `daily_pnl` result. It does not split realized and unrealized fields at the API layer.
 
 ### 8. `import_batches`
 

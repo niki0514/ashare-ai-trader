@@ -114,7 +114,7 @@ def _build_row(record: dict, idx: int) -> dict:
         "lots": lots or 0,
         "validity": validity or "DAY",
         "validationStatus": "ERROR" if issues else "VALID",
-        "validationMessage": "；".join(issues) if issues else "文件解析成功",
+        "validationMessage": "；".join(issues) if issues else "校验通过",
     }
 
 

@@ -9,7 +9,8 @@
 - 账户完全由数据库管理，不再内置 demo 用户或示例数据
 - 支持用户隔离：通过请求头 `X-User-Id` 切换账户
 - 仅盘中轮巡实时行情，成交即时落库
-- 午休和收盘在阶段切换时落库当日价格，非交易时段只读取已冻结快照
+- 历史日线、收盘回补、实时结算统一采用 raw 价格口径（腾讯 `bfq`）
+- 盘中只计算不落库；午休落非 final 快照，收盘落 final 快照；周末/节假日不生成 `daily_pnl`
 
 ## 目录
 
@@ -27,13 +28,14 @@
 make dev-up
 ```
 
+`make dev-up` 默认就是热更新模式，会以 `ASHARE_RELOAD=true` 启动后端。
+
 或手动执行：
 
 ```bash
 docker compose up -d postgres
 cd backend
-uv run python -m app.bootstrap
-uv run python -m app
+ASHARE_RELOAD=true uv run python -m app
 ```
 
 服务默认监听：`http://localhost:3101`
@@ -45,16 +47,16 @@ postgresql+psycopg://ashare:ashare@127.0.0.1:5433/ashare_ai_trader
 ```
 
 - Docker 编排文件在项目根目录 `../docker-compose.yml`
-- `uv run python -m app.bootstrap` 只负责初始化当前表结构
+- 如果你想把 backend/frontend 一起跑在 Docker 里并保留热更新，可在项目根目录执行 `make dev-docker-up`
+- 当前应用启动不再自动执行任何 schema 初始化
 - 如果要切换到别的数据库，直接设置 `ASHARE_DATABASE_URL`
-- 首次启动后若数据库为空，需要先通过前端或 `POST /api/users` 创建账户
-
-### 独立初始化数据库
-
-```bash
-cd backend
-uv run python -m app.bootstrap
-```
+- 如果你连接的是新的空数据库，需要先在库外执行 `uv run python -m devtools.schema init`
+- Docker PostgreSQL 数据保存在固定 volume `ashare-ai-trader_ashare_postgres_data`，容器重启不会影响业务数据
+- 如果你要恢复本地 `Test User` 测试数据，可执行 `ASHARE_CONFIRM_RESTORE_TEST_USER=1 uv run python -m devtools.restore_test_user`
+  这属于开发辅助脚本；针对 PostgreSQL 运行时现在要求显式确认，避免误写持久化运行库
+- 如果你已经保留了用户和成交事实、只想按新口径重建衍生层，可执行 `ASHARE_CONFIRM_REBUILD_DERIVED_DATA=1 uv run python -m devtools.rebuild_derived_data`
+  该脚本会删除并重建 `eod_prices`、`daily_pnl`、`daily_pnl_details`，不会删除用户、成交、持仓和现金流水
+- 如果你要重置整库并写入样例成交，只能显式执行 `ASHARE_CONFIRM_SAMPLE_ACCOUNT_RESET=RESET_SAMPLE_ACCOUNT uv run python -m devtools.sample_account`
 
 ## 测试
 
@@ -69,6 +71,10 @@ uv run --with pytest --with pytest-asyncio pytest -q
 2. 新建用户后基础账户接口可正常回读
 3. 重名用户创建会被拒绝
 
+注意：
+
+- 测试使用共享 SQLite 临时库，执行 `pytest` 时不要并行跑多个进程
+
 ## 收益口径（当前唯一真值）
 
 当前统一采用 **账户资产变动口径**：
@@ -76,6 +82,7 @@ uv run --with pytest --with pytest-asyncio pytest -q
 - 组合当日盈亏：`dailyPnl(d) = totalAssets(d) - totalAssets(d-1)`
 - 累计盈亏：`cumulativePnl(d) = totalAssets(d) - initialCapital`
 - 明细校验：`sum(detail.dailyPnl) = calendar.dailyPnl`
+- 日收益明细只保留 `dailyPnl / dailyReturn`，不再拆 `realized/unrealized`
 - 单票通用公式：`detailDailyPnl = closePrice * closingShares + sellAmount - prevClose * openingShares - buyAmount`
   - `prevClose` 来自前一交易日该票 `detail.closePrice`
   - `buyAmount / sellAmount` 来自当日该票成交金额聚合
@@ -95,6 +102,8 @@ uv run --with pytest --with pytest-asyncio pytest -q
 说明：
 
 - 持仓页 `todayPnl` 是“剩余持仓相对昨收的变动”，仅用于持仓视角展示，不等于组合日收益。
+- 查询链路会在午休/收盘时自愈补结算；如果引擎停掉，`dashboard/calendar` 仍会按同一套结算逻辑补齐交易日快照。
+- 周末/节假日不会为当天生成 `daily_pnl`；只会在有条件时回补上一个缺失的交易日。
 - 收益真值基线以当前 Python 后端实现和回归测试为准。
 
 ## 说明

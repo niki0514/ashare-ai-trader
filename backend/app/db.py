@@ -31,9 +31,6 @@ def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
 
-def init_schema() -> None:
-    Base.metadata.create_all(bind=engine)
-
 
 @contextmanager
 def session_scope() -> Iterator[Session]:

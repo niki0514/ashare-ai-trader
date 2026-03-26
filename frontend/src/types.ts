@@ -1,4 +1,10 @@
-export type MarketStatus = "pre_open" | "trading" | "lunch_break" | "closed" | "weekend";
+export type MarketStatus =
+  | "pre_open"
+  | "trading"
+  | "lunch_break"
+  | "closed"
+  | "weekend"
+  | "holiday";
 
 export type DashboardResponse = {
   tradeDate: string;
@@ -36,15 +42,19 @@ export type PositionRow = {
   returnRate: number;
   todayPnl: number;
   todayReturn: number;
-  pendingOrders: Array<{
-    id: string;
-    tradeDate: string;
-    side: "BUY" | "SELL";
-    price: number;
-    shares: number;
-    lots: number;
-    status: "confirmed" | "pending" | "triggered";
-  }>;
+};
+
+export type ClosedPositionRow = {
+  symbol: string;
+  name: string;
+  openedAt: string;
+  closedAt: string;
+  buyShares: number;
+  sellShares: number;
+  buyPrice: number;
+  sellPrice: number;
+  realizedPnl: number;
+  returnRate: number;
 };
 
 export type PendingOrderRow = {
@@ -100,33 +110,15 @@ export type DailyPnlDetailRow = {
   sellPrice: number;
   openPrice: number;
   closePrice: number;
-  realizedPnl: number;
-  unrealizedPnl: number;
   dailyPnl: number;
   dailyReturn: number;
-};
-
-export type QuoteRow = {
-  symbol: string;
-  name: string;
-  price: number;
-  open: number;
-  previousClose: number;
-  high: number;
-  low: number;
-  updatedAt: string;
-};
-
-export type QuoteResponse = {
-  marketStatus: MarketStatus;
-  updatedAt: string;
-  quotes: QuoteRow[];
 };
 
 export type ImportPreviewRow = {
   rowNumber: number;
   tradeDate: string;
   symbol: string;
+  name: string;
   side: "BUY" | "SELL";
   price: number;
   lots: number;
@@ -157,9 +149,18 @@ export type ImportCommitResponse = {
   importedCount: number;
 };
 
+export type ResolvedSymbolRow = {
+  symbol: string;
+  name: string;
+  resolved: boolean;
+  previousClose?: number;
+  source: "intraday" | "eod" | "quote" | "unknown";
+};
+
 export type LatestImportBatchItem = {
   rowNumber: number;
   symbol: string;
+  name: string;
   side: "BUY" | "SELL";
   limitPrice: number;
   lots: number;

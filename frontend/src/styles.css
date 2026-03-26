@@ -122,14 +122,6 @@ table {
   line-height: 1;
 }
 
-.account-create-button {
-  min-height: 28px;
-  padding: 0 10px;
-  border-radius: 9px;
-  font-size: 13px;
-  line-height: 1;
-}
-
 .empty-account-state {
   max-width: 680px;
   margin: 48px auto 0;
@@ -171,6 +163,14 @@ table {
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.78);
   color: var(--text);
+}
+
+.user-primary-button.account-create-button {
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1;
 }
 
 .user-primary-button:disabled,
@@ -742,6 +742,7 @@ tbody tr:hover,
 }
 
 .market-closed,
+.market-holiday,
 .market-weekend,
 .status-expired,
 .validation-warning {
@@ -1482,8 +1483,10 @@ tbody tr:hover,
 .manual-grid-row-fields {
   display: grid;
   grid-template-columns:
+    44px
     56px
     minmax(108px, 1fr)
+    minmax(132px, 1.08fr)
     minmax(92px, 0.82fr)
     minmax(132px, 1fr)
     minmax(116px, 0.94fr)
@@ -1507,6 +1510,13 @@ tbody tr:hover,
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+
+.manual-grid-select-all,
+.manual-row-select-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .manual-grid-body {
@@ -1546,8 +1556,27 @@ tbody tr:hover,
   color: var(--muted);
 }
 
+.manual-grid-checkbox {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
 .manual-field {
   min-width: 0;
+}
+
+.manual-name-cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.manual-name-cell-empty {
+  color: var(--muted);
 }
 
 .manual-validation-cell {
@@ -1622,6 +1651,14 @@ tbody tr:hover,
   align-items: center;
   gap: 10px 12px;
   flex-wrap: wrap;
+}
+
+.import-submit-hint {
+  max-width: 460px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  text-align: right;
 }
 
 .validation-note {
@@ -1750,6 +1787,10 @@ button {
     align-items: flex-start;
   }
 
+  .import-submit-hint {
+    text-align: left;
+  }
+
   .footer-actions {
     justify-content: flex-start;
   }
@@ -1850,7 +1891,7 @@ button {
 
   .manual-grid-header,
   .manual-grid-row-fields {
-    min-width: 1180px;
+    min-width: 1376px;
   }
 }
 

@@ -17,5 +17,53 @@ services:
       timeout: 5s
       retries: 20
 
+  backend:
+    profiles: ["dev"]
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.dev
+    container_name: ashare-backend-dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASHARE_DATABASE_URL: postgresql+psycopg://ashare:ashare@postgres:5432/ashare_ai_trader
+      ASHARE_HOST: 0.0.0.0
+      ASHARE_PORT: 3101
+      ASHARE_RELOAD: "true"
+    ports:
+      - "3101:3101"
+    volumes:
+      - ./backend:/workspace/backend
+    working_dir: /workspace/backend
+    command: sh -lc "uv run python -m devtools.schema init && uv run python -m app"
+
+  frontend:
+    profiles: ["dev"]
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile.dev
+    container_name: ashare-frontend-dev
+    depends_on:
+      backend:
+        condition: service_started
+    environment:
+      VITE_HOST: 0.0.0.0
+      VITE_PORT: 5174
+      VITE_PROXY_TARGET: http://backend:3101
+      VITE_USE_POLLING: "true"
+      VITE_HMR_HOST: localhost
+      VITE_HMR_PORT: 5174
+    ports:
+      - "5174:5174"
+    volumes:
+      - ./frontend:/workspace/frontend
+      - ashare_frontend_node_modules:/workspace/frontend/node_modules
+    working_dir: /workspace/frontend
+    command: sh -lc "npm install && npm run dev -- --host 0.0.0.0 --port 5174"
+
 volumes:
   ashare_postgres_data:
+    name: ashare-ai-trader_ashare_postgres_data
+  ashare_frontend_node_modules:
+    name: ashare-ai-trader_frontend_node_modules

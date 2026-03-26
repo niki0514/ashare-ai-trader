@@ -2,14 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
-from datetime import datetime
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
-from .bootstrap import bootstrap_database
 from .config import settings
 from .db import SessionLocal
 from .import_io import build_import_template, parse_import_file
@@ -26,6 +24,8 @@ from .schemas import (
     ImportUploadResponse,
     PreviewImportsRequest,
     QuoteResponse,
+    ResolveSymbolsRequest,
+    ResolveSymbolsResponse,
     UserSummary,
 )
 from .services import (
@@ -36,11 +36,11 @@ from .services import (
     start_engine_if_needed,
     stop_engine_if_needed,
 )
+from .time_utils import to_market_iso
 from .user_service import UserService
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    bootstrap_database()
     await start_engine_if_needed()
     try:
         yield
@@ -76,8 +76,8 @@ def _serialize_user(user) -> UserSummary:
         id=user.id,
         name=user.name,
         initialCash=user.initial_cash,
-        createdAt=user.created_at.isoformat(),
-        updatedAt=user.updated_at.isoformat(),
+        createdAt=to_market_iso(user.created_at),
+        updatedAt=to_market_iso(user.updated_at),
     )
 
 
@@ -105,7 +105,6 @@ def create_user(payload: CreateUserRequest, db: Session = Depends(get_db)):
         detail = str(exc)
         status_code = 409 if detail == "User name already exists" else 400
         raise HTTPException(status_code=status_code, detail=detail) from exc
-    db.commit()
     return _serialize_user(user)
 
 
@@ -117,6 +116,13 @@ def get_dashboard(db: Session = Depends(get_db), user_id: str = Depends(get_user
 @app.get("/api/positions")
 def get_positions(db: Session = Depends(get_db), user_id: str = Depends(get_user_id)):
     return {"rows": QueryService(db).get_positions(user_id)}
+
+
+@app.get("/api/positions/closed")
+def get_closed_positions(
+    db: Session = Depends(get_db), user_id: str = Depends(get_user_id)
+):
+    return {"rows": QueryService(db).get_closed_positions(user_id)}
 
 
 @app.get("/api/orders/pending")
@@ -132,7 +138,6 @@ def delete_order(order_id: str, db: Session = Depends(get_db), user_id: str = De
         detail = str(exc)
         status_code = 404 if detail == "委托不存在" else 409
         raise HTTPException(status_code=status_code, detail=detail) from exc
-    db.commit()
     return {"deletedId": deleted_id}
 
 
@@ -149,6 +154,20 @@ def get_calendar(db: Session = Depends(get_db), user_id: str = Depends(get_user_
 @app.get("/api/pnl/daily/{date}")
 def get_daily_detail(date: str, db: Session = Depends(get_db), user_id: str = Depends(get_user_id)):
     return {"date": date, "rows": QueryService(db).get_daily_detail(user_id, date)}
+
+
+@app.post("/api/symbols/resolve", response_model=ResolveSymbolsResponse)
+def resolve_symbols(
+    payload: ResolveSymbolsRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    return {
+        "rows": ImportService(db).resolve_symbols(
+            target_trade_date=payload.targetTradeDate,
+            symbols=payload.symbols,
+        )
+    }
 
 
 @app.post("/api/imports/preview", response_model=ImportPreviewResponse)
@@ -175,7 +194,6 @@ def preview_imports(payload: PreviewImportsRequest, db: Session = Depends(get_db
         mode=payload.mode,
         rows=rows,
     )
-    db.commit()
     return result
 
 
@@ -200,6 +218,10 @@ async def upload_import_file(
     batch_ids: dict[str, str] = {}
     import_service = ImportService(db)
     for trade_date in sorted(grouped_rows):
+        import_service.resolve_symbols(
+            target_trade_date=trade_date,
+            symbols=[str(row["symbol"]) for row in grouped_rows[trade_date]],
+        )
         result = import_service.create_import_preview(
             user_id=user_id,
             target_trade_date=trade_date,
@@ -211,7 +233,6 @@ async def upload_import_file(
         batch_ids[trade_date] = result["batchId"]
         preview_rows.extend(result["rows"])
 
-    db.commit()
     preview_rows.sort(key=lambda row: row["rowNumber"])
     return {
         "fileName": file.filename,
@@ -232,14 +253,13 @@ def download_import_template(targetTradeDate: str | None = None):
 @app.post("/api/imports/commit", response_model=ImportCommitResponse)
 def commit_imports(payload: CommitImportsRequest, db: Session = Depends(get_db), user_id: str = Depends(get_user_id)):
     if not market_clock.is_import_window_open():
-        raise HTTPException(status_code=403, detail="当前为休市日，仅允许在交易日提交导入")
+        raise HTTPException(status_code=403, detail="当前为交易时段，仅允许在休盘时提交导入")
     try:
         result = ImportService(db).commit_import_batch(user_id, payload.batchId, payload.mode)
     except ValueError as exc:
         detail = str(exc)
         status_code = 404 if detail == "Import batch not found" else 409
         raise HTTPException(status_code=status_code, detail=detail) from exc
-    db.commit()
     return result
 
 
@@ -256,11 +276,12 @@ def latest_imports(tradeDate: str = Query(default=""), db: Session = Depends(get
                 "fileName": batch.file_name,
                 "mode": batch.mode.value,
                 "status": batch.status.value,
-                "createdAt": batch.created_at.isoformat(),
+                "createdAt": to_market_iso(batch.created_at),
                 "items": [
                     {
                         "rowNumber": item.row_number,
                         "symbol": item.symbol,
+                        "name": item.symbol_name or item.symbol,
                         "side": item.side.value,
                         "limitPrice": item.limit_price,
                         "lots": item.lots,
@@ -282,7 +303,6 @@ def clear_import_drafts(
     user_id: str = Depends(get_user_id),
 ):
     deleted_count = OrderRepository(db).delete_draft_import_batches(user_id, tradeDate)
-    db.commit()
     return {"deletedCount": deleted_count}
 
 
@@ -306,7 +326,6 @@ async def get_quotes(
         }
 
     rows = await quote_service.fetch_and_store_quotes(symbol_list)
-    db.commit()
     return {
         "marketStatus": market_session.market_status,
         "updatedAt": quote_service.latest_updated_at(),
@@ -318,4 +337,4 @@ async def get_quotes(
 @app.post("/api/dev/tick")
 async def dev_tick():
     processed = await run_engine_tick_once()
-    return {"processed": processed, "updatedAt": datetime.now().isoformat()}
+    return {"processed": processed, "updatedAt": to_market_iso(None)}

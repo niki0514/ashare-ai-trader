@@ -28,6 +28,8 @@ export function statusLabel(status: MarketStatus) {
       return "已收盘";
     case "weekend":
       return "周末休市";
+    case "holiday":
+      return "节假日休市";
   }
 }
 
@@ -48,8 +50,4 @@ export function orderStatusLabel(status: PendingOrderRow["status"] | "filled") {
     case "rejected":
       return "已拒绝";
   }
-}
-
-export function toQuoteSymbol(symbol: string) {
-  return symbol.startsWith("6") ? `sh${symbol}` : `sz${symbol}`;
 }

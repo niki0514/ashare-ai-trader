@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
-
 from sqlalchemy.orm import Session
 
 from .repositories import PortfolioRepository, UserRepository
+from .time_utils import account_bootstrap_time
 
 
 class UserService:
@@ -48,10 +47,10 @@ class UserService:
         )
         self.portfolio_repo.add_cash_entry(
             user_id=user.id,
-            entry_time=datetime.now(),
+            # Initial cash must sort before any later backfilled trades.
+            entry_time=account_bootstrap_time(),
             entry_type="INITIAL",
             amount=user.initial_cash,
-            balance_after=user.initial_cash,
             reference_type="UserAccountBootstrap",
         )
         return user

@@ -12,11 +12,13 @@ class Settings(BaseSettings):
     app_name: str = "A-share AI Trader Backend"
     host: str = "0.0.0.0"
     port: int = 3101
+    reload: bool = False
     database_url: str = DEFAULT_DATABASE_URL
     quote_poll_seconds: float = 1.0
     quote_timeout_seconds: float = 5.0
     engine_enabled: bool = True
     market_now_override: str | None = None
+    market_holiday_dates: str = ""
 
 
 settings = Settings()

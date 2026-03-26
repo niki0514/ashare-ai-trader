@@ -3,17 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from .market import market_clock
 from .quote_client import to_quote_symbol
 from .repositories import MarketDataRepository
+from .time_utils import to_market_naive
 
 
 def trade_date_of(value: datetime | None) -> str | None:
-    if value is None:
-        return None
-    if value.tzinfo:
-        return value.astimezone(market_clock.now().tzinfo).date().isoformat()
-    return value.date().isoformat()
+    normalized = to_market_naive(value)
+    return normalized.date().isoformat() if normalized else None
 
 
 @dataclass(slots=True)

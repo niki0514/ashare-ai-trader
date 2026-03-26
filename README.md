@@ -16,13 +16,15 @@ This repository contains an instruction-driven A-share paper trading system.
 make dev-up
 ```
 
+`make dev-up` 会以热更新模式启动本地 backend 和 frontend。
+
 或手动执行：
 
 ```bash
 docker compose up -d postgres
 cd backend
-uv run python -m app.bootstrap
-uv run python -m app
+uv run python -m devtools.schema init
+ASHARE_RELOAD=true uv run python -m app
 ```
 
 Backend runs on `http://localhost:3101`.
@@ -37,7 +39,39 @@ npm run dev
 
 Frontend runs on `http://localhost:5174`.
 
-`make dev-up` 会一起拉起 Docker PostgreSQL、初始化表结构、启动 backend 和 frontend。
+`make dev-up` 会一起拉起 Docker PostgreSQL、启动 backend 和 frontend。
+
+## Docker 热更新开发
+
+如果你希望前后端都跑在 Docker 里，同时保留热更新：
+
+```bash
+make dev-docker-up
+```
+
+这会启动：
+
+- `postgres`
+- `backend`：FastAPI + `uvicorn --reload`
+- `frontend`：Vite HMR
+
+访问地址仍然是：
+
+- Frontend: `http://localhost:5174`
+- Backend: `http://localhost:3101`
+
+常用命令：
+
+```bash
+make dev-docker-down
+make dev-docker-logs
+```
+
+## 数据安全
+
+- PostgreSQL 使用固定命名卷 `ashare-ai-trader_ashare_postgres_data`，避免因 Compose 项目名变化误连到新空卷
+- `docker compose restart postgres` 或 `docker compose down` 后再次启动，数据仍会保留在本地 volume
+- `docker compose down -v` 会删除持久化卷，执行前务必确认不再需要当前数据
 
 ## Backend 验收
 
@@ -56,8 +90,6 @@ uv run pytest
 - During trading hours, the backend polls Tencent quotes and persists trades in real time
 - At lunch break and market close, the engine freezes the current session prices into the database; outside trading, dashboard reads persisted snapshots instead of request-time quotes
 - The default database is Docker PostgreSQL: `postgresql+psycopg://ashare:ashare@127.0.0.1:5433/ashare_ai_trader`
-- `uv run python -m app.bootstrap` only initializes the active schema
-
 ## PnL Source of Truth
 
 - 当前统一采用 **账户资产变动口径** 作为唯一真值（source of truth）

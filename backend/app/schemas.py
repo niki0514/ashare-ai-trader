@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-MarketStatus = Literal["pre_open", "trading", "lunch_break", "closed", "weekend"]
+MarketStatus = Literal["pre_open", "trading", "lunch_break", "closed", "weekend", "holiday"]
 
 
 class QuoteRow(BaseModel):
@@ -18,32 +18,6 @@ class QuoteRow(BaseModel):
     high: float
     low: float
     updatedAt: str
-
-
-class PositionPendingOrder(BaseModel):
-    id: str
-    tradeDate: str
-    side: Literal["BUY", "SELL"]
-    price: float
-    shares: int
-    lots: int
-    status: Literal["confirmed", "pending", "triggered"]
-
-
-class PositionRow(BaseModel):
-    symbol: str
-    name: str
-    shares: int
-    sellableShares: int
-    frozenSellShares: int
-    costPrice: float
-    lastPrice: float
-    todayPnl: float
-    todayReturn: float
-    marketValue: float
-    pnl: float
-    returnRate: float
-    pendingOrders: list[PositionPendingOrder]
 
 
 class PendingOrderTransition(BaseModel):
@@ -107,8 +81,6 @@ class DailyPnlDetailRow(BaseModel):
     sellPrice: float
     openPrice: float
     closePrice: float
-    realizedPnl: float
-    unrealizedPnl: float
     dailyPnl: float
     dailyReturn: float
 
@@ -147,6 +119,7 @@ class ImportPreviewRow(BaseModel):
     rowNumber: int
     tradeDate: str
     symbol: str
+    name: str
     side: Literal["BUY", "SELL"]
     price: float
     lots: int
@@ -191,6 +164,23 @@ class PreviewImportsRequest(BaseModel):
     sourceType: Literal["MANUAL", "XLSX", "CSV"] = "MANUAL"
     fileName: str | None = None
     rows: list[ManualImportRowInput]
+
+
+class ResolveSymbolsRequest(BaseModel):
+    targetTradeDate: str
+    symbols: list[str]
+
+
+class ResolvedSymbolRow(BaseModel):
+    symbol: str
+    name: str
+    resolved: bool
+    previousClose: float | None = None
+    source: Literal["intraday", "eod", "quote", "unknown"]
+
+
+class ResolveSymbolsResponse(BaseModel):
+    rows: list[ResolvedSymbolRow]
 
 
 class CommitImportsRequest(BaseModel):

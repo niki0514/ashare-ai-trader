@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from sqlalchemy import func, select
+
 from app.db import session_scope
 from app.market import market_clock
+from app.models import CashLedger, ExecutionTrade, ImportBatch, InstructionOrder, PositionLot, User
 from app.repositories import (
     MarketDataRepository,
     OrderRepository,
@@ -9,7 +12,7 @@ from app.repositories import (
     UserRepository,
 )
 from app.services import PnlService
-from devtools.schema import reset_db
+from devtools.schema import init_db
 from devtools.safety import require_postgres_confirmation
 from devtools.test_user_seed import (
     TEST_INITIAL_CASH,
@@ -21,8 +24,21 @@ from devtools.test_user_seed import (
 )
 
 
-def reset_database() -> None:
-    reset_db()
+def _assert_sample_account_target_is_empty() -> None:
+    with session_scope() as session:
+        row_counts = {
+            "users": session.scalar(select(func.count()).select_from(User)) or 0,
+            "orders": session.scalar(select(func.count()).select_from(InstructionOrder)) or 0,
+            "trades": session.scalar(select(func.count()).select_from(ExecutionTrade)) or 0,
+            "cash": session.scalar(select(func.count()).select_from(CashLedger)) or 0,
+            "positions": session.scalar(select(func.count()).select_from(PositionLot)) or 0,
+            "imports": session.scalar(select(func.count()).select_from(ImportBatch)) or 0,
+        }
+
+    if any(row_counts.values()):
+        raise RuntimeError(
+            "当前数据库已包含业务数据，sample_account 仅可用于空库初始化，不会覆盖现有数据。"
+        )
 
 
 def seed_sample_account(
@@ -33,10 +49,11 @@ def seed_sample_account(
 ) -> str:
     require_postgres_confirmation(
         action="uv run python -m devtools.sample_account",
-        confirm_env="ASHARE_CONFIRM_SAMPLE_ACCOUNT_RESET",
-        expected_value="RESET_SAMPLE_ACCOUNT",
+        confirm_env="ASHARE_CONFIRM_SAMPLE_ACCOUNT_INIT",
+        expected_value="INIT_SAMPLE_ACCOUNT",
     )
-    reset_database()
+    init_db()
+    _assert_sample_account_target_is_empty()
     as_of_trade_date = market_clock.get_session().trade_date
     trade_dates = sample_trade_dates_before(as_of_trade_date)
 
@@ -68,7 +85,7 @@ def seed_sample_account(
 def main() -> None:
     seed_sample_account()
     print(
-        f"Seeded sample account {TEST_USER_NAME} ({TEST_USER_ID}) after resetting the database."
+        f"Seeded sample account {TEST_USER_NAME} ({TEST_USER_ID}) into an empty database."
     )
 
 

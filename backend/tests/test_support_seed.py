@@ -16,17 +16,12 @@ from app.repositories import (
     UserRepository,
 )
 from devtools.sample_account import seed_sample_account
-from devtools.schema import reset_db
 from devtools.rebuild_derived_data import rebuild_derived_data
 from devtools.restore_test_user import restore_test_user
 
 
 LEGACY_USER_NAME = "legacy-user"
 REBUILD_USER_NAME = "rebuild-user"
-
-
-def reset_database() -> None:
-    reset_db()
 
 
 def test_seed_sample_account_uses_expected_cash_and_pnl_baseline() -> None:
@@ -48,10 +43,21 @@ def test_seed_sample_account_uses_expected_cash_and_pnl_baseline() -> None:
         settings.market_now_override = previous_override
 
 
+def test_seed_sample_account_refuses_nonempty_database() -> None:
+    with session_scope() as session:
+        UserRepository(session).create(name="existing-user", initial_cash=100000)
+
+    try:
+        seed_sample_account()
+    except RuntimeError as exc:
+        assert "仅可用于空库初始化" in str(exc)
+    else:
+        raise AssertionError("seed_sample_account should refuse non-empty databases")
+
+
 def test_restore_test_user_replaces_existing_seed_account_and_removes_legacy_user(
     monkeypatch,
 ) -> None:
-    reset_database()
     monkeypatch.setattr(
         TencentQuoteClient,
         "fetch_quotes_sync",
@@ -85,8 +91,37 @@ def test_restore_test_user_replaces_existing_seed_account_and_removes_legacy_use
         assert (session.scalar(select(func.count()).select_from(PositionLot)) or 0) > 0
 
 
+def test_restore_test_user_removes_all_duplicate_users_for_requested_names(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        TencentQuoteClient,
+        "fetch_quotes_sync",
+        lambda self, symbols: [],
+    )
+    monkeypatch.setattr(
+        TencentQuoteClient,
+        "fetch_daily_bars_sync",
+        lambda self, symbol, *, start_trade_date, end_trade_date: [],
+    )
+
+    with session_scope() as session:
+        repo = UserRepository(session)
+        repo.create(name="api-user", initial_cash=100000)
+        repo.create(name="api-user", initial_cash=100000)
+        repo.create(name="api-user", initial_cash=100000)
+
+    summary = restore_test_user(delete_user_names=("api-user",))
+
+    removed_user_names = [row["name"] for row in summary["removedUsers"]]
+    assert removed_user_names.count("api-user") == 3
+
+    with session_scope() as session:
+        users = UserRepository(session).list_users()
+        assert [user.name for user in users] == ["Test User"]
+
+
 def test_rebuild_derived_data_preserves_users_and_trade_facts(monkeypatch) -> None:
-    reset_database()
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-03-25T15:10:00+08:00"
 

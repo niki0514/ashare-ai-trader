@@ -81,6 +81,14 @@ class UserRepository:
         stmt = select(User).where(User.name == name)
         return self.session.scalar(stmt)
 
+    def list_by_name(self, name: str) -> list[User]:
+        stmt = (
+            select(User)
+            .where(User.name == name)
+            .order_by(User.created_at.asc(), User.id.asc())
+        )
+        return list(self.session.scalars(stmt).all())
+
     def create(
         self, *, name: str, initial_cash: float, user_id: str | None = None
     ) -> User:

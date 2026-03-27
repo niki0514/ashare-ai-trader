@@ -40,11 +40,6 @@ def init_db() -> str:
     )
 
 
-def reset_db() -> None:
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
-
-
 def schema_status() -> dict[str, list[str] | str]:
     expected_tables = sorted(_expected_tables())
     existing_tables = sorted(_existing_tables())

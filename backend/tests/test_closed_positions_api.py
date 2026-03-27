@@ -6,19 +6,13 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.repositories import OrderRepository, PortfolioRepository, UserRepository
-from devtools.schema import reset_db
 from app.db import session_scope
 
 
 TEST_USER_NAME = "closed-position-user"
 
 
-def reset_database() -> None:
-    reset_db()
-
-
 def test_closed_positions_endpoint_lists_fully_exited_symbols() -> None:
-    reset_database()
 
     with session_scope() as session:
         user_id = UserRepository(session).create(

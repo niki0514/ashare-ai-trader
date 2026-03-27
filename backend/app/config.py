@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import sys
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 DEFAULT_DATABASE_URL = "postgresql+psycopg://ashare:ashare@127.0.0.1:5433/ashare_ai_trader"
+
+
+def _running_under_pytest() -> bool:
+    return "pytest" in sys.modules
 
 
 class Settings(BaseSettings):
@@ -22,3 +28,10 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+if _running_under_pytest() and not settings.database_url.startswith("sqlite"):
+    raise RuntimeError(
+        "Pytest must run against an isolated SQLite database. "
+        f"Got: {settings.database_url}"
+    )

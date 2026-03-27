@@ -72,6 +72,7 @@ make dev-docker-logs
 - PostgreSQL 使用固定命名卷 `ashare-ai-trader_ashare_postgres_data`，避免因 Compose 项目名变化误连到新空卷
 - `docker compose restart postgres` 或 `docker compose down` 后再次启动，数据仍会保留在本地 volume
 - `docker compose down -v` 会删除持久化卷，执行前务必确认不再需要当前数据
+- 仓库内的开发工具不再提供“删库重建”操作；样例账户只允许在空库（新库未建表，或已建表但仍无业务数据）时显式初始化，不会覆盖现有数据
 
 ## Backend 验收
 
@@ -81,6 +82,7 @@ uv run pytest
 ```
 
 当前保留的是不依赖仓库内置 mock/seed 的最小 API 回归。
+测试会自动使用临时 SQLite，不会写入运行中的 PostgreSQL。
 
 ## Backend Notes
 

@@ -52,17 +52,19 @@ postgresql+psycopg://ashare:ashare@127.0.0.1:5433/ashare_ai_trader
 - 如果要切换到别的数据库，直接设置 `ASHARE_DATABASE_URL`
 - 如果你连接的是新的空数据库，需要先在库外执行 `uv run python -m devtools.schema init`
 - Docker PostgreSQL 数据保存在固定 volume `ashare-ai-trader_ashare_postgres_data`，容器重启不会影响业务数据
+- 后端开发工具中已不再提供任何“删库重建”入口
 - 如果你要恢复本地 `Test User` 测试数据，可执行 `ASHARE_CONFIRM_RESTORE_TEST_USER=1 uv run python -m devtools.restore_test_user`
   这属于开发辅助脚本；针对 PostgreSQL 运行时现在要求显式确认，避免误写持久化运行库
 - 如果你已经保留了用户和成交事实、只想按新口径重建衍生层，可执行 `ASHARE_CONFIRM_REBUILD_DERIVED_DATA=1 uv run python -m devtools.rebuild_derived_data`
   该脚本会删除并重建 `eod_prices`、`daily_pnl`、`daily_pnl_details`，不会删除用户、成交、持仓和现金流水
-- 如果你要重置整库并写入样例成交，只能显式执行 `ASHARE_CONFIRM_SAMPLE_ACCOUNT_RESET=RESET_SAMPLE_ACCOUNT uv run python -m devtools.sample_account`
+- 如果你要在空库里初始化样例账户（新库未建表，或已建表但仍无业务数据），可显式执行 `ASHARE_CONFIRM_SAMPLE_ACCOUNT_INIT=INIT_SAMPLE_ACCOUNT uv run python -m devtools.sample_account`
+  该脚本会先补齐空库表结构；一旦检测到现有业务数据，会直接拒绝，不会覆盖现有库
 
 ## 测试
 
 ```bash
 cd backend
-uv run --with pytest --with pytest-asyncio pytest -q
+uv run pytest
 ```
 
 当前保留的是不依赖本地 mock 数据的最小 API 回归用例，覆盖：
@@ -71,9 +73,7 @@ uv run --with pytest --with pytest-asyncio pytest -q
 2. 新建用户后基础账户接口可正常回读
 3. 重名用户创建会被拒绝
 
-注意：
-
-- 测试使用共享 SQLite 临时库，执行 `pytest` 时不要并行跑多个进程
+测试会自动使用临时 SQLite，不会连接运行中的 PostgreSQL。
 
 ## 收益口径（当前唯一真值）
 
@@ -108,6 +108,5 @@ uv run --with pytest --with pytest-asyncio pytest -q
 
 ## 说明
 
-- 测试现在使用独立临时数据库，不再污染运行库。
 - 默认运行库为 Docker PostgreSQL，不再依赖本地 `.db` 文件。
 - 更简单的启动与入库说明见 `../docs/docker-postgres-setup.md`。

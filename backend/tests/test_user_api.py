@@ -17,18 +17,12 @@ from app.repositories import MarketDataRepository, OrderRepository, PnlRepositor
 from app.services import PnlService, QueryService, TradingService
 from app.time_utils import account_bootstrap_time
 from app.user_service import UserService
-from devtools.schema import reset_db
 
 
 TEST_USER_NAME = "api-user"
 
 
-def reset_database() -> None:
-    reset_db()
-
-
 def test_dashboard_requires_existing_user() -> None:
-    reset_database()
 
     with TestClient(app) as client:
         response = client.get("/api/dashboard")
@@ -38,7 +32,6 @@ def test_dashboard_requires_existing_user() -> None:
 
 
 def test_create_user_and_query_empty_account() -> None:
-    reset_database()
 
     with TestClient(app) as client:
         create_response = client.post(
@@ -74,7 +67,6 @@ def test_create_user_and_query_empty_account() -> None:
 
 
 def test_duplicate_user_name_is_rejected() -> None:
-    reset_database()
 
     with TestClient(app) as client:
         first = client.post(
@@ -90,7 +82,6 @@ def test_duplicate_user_name_is_rejected() -> None:
 
 
 def test_clear_import_drafts_removes_saved_drafts_for_trade_date() -> None:
-    reset_database()
 
     with TestClient(app) as client:
         create_response = client.post(
@@ -133,7 +124,6 @@ def test_clear_import_drafts_removes_saved_drafts_for_trade_date() -> None:
 
 
 def test_upload_import_uses_current_template_fields_only() -> None:
-    reset_database()
 
     with TestClient(app) as client:
         create_response = client.post(
@@ -167,7 +157,6 @@ def test_upload_import_uses_current_template_fields_only() -> None:
 
 
 def test_resolve_symbols_persists_name_for_later_preview_without_refetch(monkeypatch) -> None:
-    reset_database()
     quoted_at = datetime.strptime("2026-03-25 11:30:00", "%Y-%m-%d %H:%M:%S")
     fetch_calls = 0
 
@@ -269,7 +258,6 @@ def test_parse_import_file_uses_validation_message_for_successful_rows() -> None
 
 
 def test_upload_import_rejects_legacy_alias_fields() -> None:
-    reset_database()
 
     with TestClient(app) as client:
         create_response = client.post(
@@ -298,7 +286,6 @@ def test_upload_import_rejects_legacy_alias_fields() -> None:
 
 
 def test_delete_pending_order_marks_order_as_cancelled() -> None:
-    reset_database()
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-03-25T10:00:00+08:00"
 
@@ -344,7 +331,6 @@ def test_delete_pending_order_marks_order_as_cancelled() -> None:
 
 
 def test_current_day_day_order_is_expired_after_close_on_query() -> None:
-    reset_database()
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-03-25T15:10:00+08:00"
 
@@ -380,7 +366,6 @@ def test_current_day_day_order_is_expired_after_close_on_query() -> None:
 
 
 def test_positions_project_sellable_shares_by_trade_date() -> None:
-    reset_database()
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-03-23T15:10:00+08:00"
 
@@ -419,7 +404,6 @@ def test_positions_project_sellable_shares_by_trade_date() -> None:
 
 
 def test_positions_use_diluted_cost_basis_and_align_with_dashboard_cumulative_pnl() -> None:
-    reset_database()
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-03-25T15:10:00+08:00"
 
@@ -597,7 +581,6 @@ def test_positions_use_diluted_cost_basis_and_align_with_dashboard_cumulative_pn
 
 
 def test_tick_backfills_missing_previous_trade_day_from_next_day_previous_close() -> None:
-    reset_database()
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-03-23T15:10:00+08:00"
 
@@ -739,7 +722,6 @@ def test_tick_backfills_missing_previous_trade_day_from_next_day_previous_close(
 
 
 def test_dashboard_returns_server_suggested_import_trade_date() -> None:
-    reset_database()
     previous_override = settings.market_now_override
 
     try:
@@ -779,7 +761,6 @@ def test_dashboard_returns_server_suggested_import_trade_date() -> None:
 
 
 def test_closed_dashboard_query_finalizes_trade_date_without_engine_tick() -> None:
-    reset_database()
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-03-25T15:10:00+08:00"
 
@@ -907,7 +888,6 @@ def test_closed_dashboard_query_finalizes_trade_date_without_engine_tick() -> No
 
 
 def test_lunch_break_dashboard_persists_non_final_snapshot_but_calendar_stays_final_only() -> None:
-    reset_database()
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-03-25T12:05:00+08:00"
 
@@ -1035,7 +1015,6 @@ def test_lunch_break_dashboard_persists_non_final_snapshot_but_calendar_stays_fi
 
 
 def test_commit_imports_is_allowed_during_lunch_break() -> None:
-    reset_database()
     previous_override = settings.market_now_override
 
     try:
@@ -1079,7 +1058,6 @@ def test_commit_imports_is_allowed_during_lunch_break() -> None:
 
 
 def test_commit_imports_is_blocked_during_trading_session() -> None:
-    reset_database()
     previous_override = settings.market_now_override
 
     try:
@@ -1122,7 +1100,6 @@ def test_commit_imports_is_blocked_during_trading_session() -> None:
 
 
 def test_commit_imports_is_allowed_after_market_close(monkeypatch) -> None:
-    reset_database()
     previous_override = settings.market_now_override
     quoted_at = datetime.strptime("2026-03-25 15:05:00", "%Y-%m-%d %H:%M:%S")
     fetch_calls = 0
@@ -1204,7 +1181,6 @@ def test_commit_imports_is_allowed_after_market_close(monkeypatch) -> None:
 
 
 def test_pending_orders_without_symbol_name_falls_back_to_symbol_only() -> None:
-    reset_database()
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-03-25T10:00:00+08:00"
 
@@ -1254,7 +1230,6 @@ def test_pending_orders_without_symbol_name_falls_back_to_symbol_only() -> None:
 
 
 def test_preview_import_rejects_same_day_order_after_market_close() -> None:
-    reset_database()
     previous_override = settings.market_now_override
 
     try:
@@ -1294,7 +1269,6 @@ def test_preview_import_rejects_same_day_order_after_market_close() -> None:
 
 
 def test_future_gtc_order_is_not_activated_before_trade_date() -> None:
-    reset_database()
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-03-25T10:00:00+08:00"
 
@@ -1358,7 +1332,6 @@ def test_future_gtc_order_is_not_activated_before_trade_date() -> None:
 
 
 def test_future_day_sell_order_does_not_freeze_today_sellable_shares() -> None:
-    reset_database()
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-03-25T10:00:00+08:00"
 
@@ -1411,7 +1384,6 @@ def test_future_day_sell_order_does_not_freeze_today_sellable_shares() -> None:
 
 
 def test_overwrite_import_preserves_filled_history_and_replaces_active_orders() -> None:
-    reset_database()
 
     with session_scope() as session:
         user_id = UserRepository(session).create(
@@ -1519,7 +1491,6 @@ def test_market_clock_recognizes_official_holiday() -> None:
 
 
 def test_tick_skips_holiday_trade_date_without_creating_pnl() -> None:
-    reset_database()
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-05-01T10:00:00+08:00"
 
@@ -1551,7 +1522,6 @@ def test_tick_skips_holiday_trade_date_without_creating_pnl() -> None:
 
 
 def test_user_creation_bootstraps_cash_before_any_backfilled_trade() -> None:
-    reset_database()
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-03-25T10:00:00+08:00"
 

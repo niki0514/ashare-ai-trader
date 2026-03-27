@@ -144,6 +144,10 @@ def _normalized_unique(values: Iterable[str]) -> list[str]:
     return normalized
 
 
+def _users_by_name(*, user_repo: UserRepository, name: str) -> list:
+    return user_repo.list_by_name(name)
+
+
 def restore_test_user(
     *,
     user_id: str = TEST_USER_ID,
@@ -181,9 +185,9 @@ def restore_test_user(
 
         queue_delete(user_repo.get(user_id))
 
-        same_name_user = user_repo.get_by_name(name)
-        if same_name_user is not None and same_name_user.id != user_id:
-            queue_delete(same_name_user)
+        for same_name_user in _users_by_name(user_repo=user_repo, name=name):
+            if same_name_user.id != user_id:
+                queue_delete(same_name_user)
 
         for doomed_user_id in delete_user_ids:
             if doomed_user_id != user_id:
@@ -191,7 +195,8 @@ def restore_test_user(
 
         for doomed_name in delete_user_names:
             if doomed_name != name:
-                queue_delete(user_repo.get_by_name(doomed_name))
+                for doomed_user in _users_by_name(user_repo=user_repo, name=doomed_name):
+                    queue_delete(doomed_user)
 
         for doomed_user_id in removed_user_ids:
             user_repo.delete(doomed_user_id)

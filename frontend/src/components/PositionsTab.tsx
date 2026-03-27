@@ -102,6 +102,7 @@ export function PositionsTab({
                 <tr>
                   <th>挂单日期</th>
                   <th>股票代码</th>
+                  <th>名称</th>
                   <th>操作</th>
                   <th>挂单方式</th>
                   <th>委托数量</th>
@@ -115,6 +116,7 @@ export function PositionsTab({
                   <tr key={order.id}>
                     <td>{order.tradeDate}</td>
                     <td>{order.symbol}</td>
+                    <td>{order.name}</td>
                     <td>{tradeSideLabel(order.side)}</td>
                     <td>{orderValidityLabel(order.validity)}</td>
                     <td>{formatNumber(order.shares)}</td>

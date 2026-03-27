@@ -70,9 +70,11 @@ ashare-ai-trader_ashare_postgres_data
 
 - `devtools.schema init` 只负责准备表结构，不会自动创建任何用户
 - 首次启动后请通过前端或 `POST /api/users` 创建账户
+- 当前开发工具中不再提供“删库重建”入口
 - 如果你需要本地测试数据，可执行 `cd backend && ASHARE_CONFIRM_RESTORE_TEST_USER=1 uv run python -m devtools.restore_test_user`
 - 如果你已经保留了用户和成交事实，只想按新结算口径重建衍生层，可执行 `cd backend && ASHARE_CONFIRM_REBUILD_DERIVED_DATA=1 uv run python -m devtools.rebuild_derived_data`
-- 如果你要重置整库并导入样例账户，必须显式执行 `cd backend && ASHARE_CONFIRM_SAMPLE_ACCOUNT_RESET=RESET_SAMPLE_ACCOUNT uv run python -m devtools.sample_account`
+- 如果你要在空库里初始化样例账户（新库未建表，或已建表但仍无业务数据），必须显式执行 `cd backend && ASHARE_CONFIRM_SAMPLE_ACCOUNT_INIT=INIT_SAMPLE_ACCOUNT uv run python -m devtools.sample_account`
+  该脚本会先补齐空库表结构；若检测到已有业务数据，会直接拒绝，不会覆盖原库
 
 ## 入库建议
 

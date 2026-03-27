@@ -17,6 +17,7 @@ os.environ["ASHARE_ENGINE_ENABLED"] = "false"
 
 import app.models  # noqa: E402,F401
 from app.db import Base, engine  # noqa: E402
+from app.quote_client import TencentQuoteClient  # noqa: E402
 
 
 if engine.dialect.name != "sqlite":
@@ -32,6 +33,16 @@ def _fresh_test_database() -> None:
     Base.metadata.create_all(bind=engine)
     yield
     engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _disable_live_quote_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(TencentQuoteClient, "fetch_quotes_sync", lambda self, symbols: [])
+    monkeypatch.setattr(
+        TencentQuoteClient,
+        "fetch_daily_bars_sync",
+        lambda self, symbol, *, start_trade_date, end_trade_date: [],
+    )
 
 
 @atexit.register

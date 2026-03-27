@@ -6,7 +6,7 @@ import re
 
 from sqlalchemy.orm import Session
 
-from .market import market_clock
+from .market import market_clock, previous_trading_date
 from .market_prices import trade_date_of
 from .models import ImportBatchStatus, OrderStatus, ValidationStatus
 from .quote_client import TencentQuoteClient, from_quote_symbol, to_quote_symbol
@@ -71,6 +71,17 @@ class ImportService:
     def _round_cny(value: Decimal) -> Decimal:
         return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
+    @staticmethod
+    def _reference_trade_date(target_trade_date: str) -> str:
+        return previous_trading_date(target_trade_date)
+
+    @staticmethod
+    def _is_post_close_snapshot(quote_trade_date: str, reference_trade_date: str, quoted_at) -> bool:
+        return (
+            quote_trade_date == reference_trade_date
+            and quoted_at.strftime("%H:%M:%S") >= "15:00:00"
+        )
+
     def _market_snapshot_by_symbol(
         self,
         target_trade_date: str,
@@ -79,59 +90,135 @@ class ImportService:
         allow_remote_fetch: bool = False,
     ) -> dict[str, dict[str, float | str]]:
         snapshots: dict[str, dict[str, float | str]] = {}
+        reference_trade_date = self._reference_trade_date(target_trade_date)
         missing_symbols: list[str] = []
         for symbol in symbols:
-            latest_eod = self.market_repo.latest_eod_price(symbol, trade_date_lte=target_trade_date)
             snapshot = snapshots.setdefault(symbol, {})
-            if latest_eod:
-                if latest_eod.symbol_name:
-                    snapshot["name"] = latest_eod.symbol_name
+            reference_eod = self.market_repo.get_eod_price(symbol, reference_trade_date)
+            if reference_eod:
+                if reference_eod.symbol_name:
+                    snapshot["name"] = reference_eod.symbol_name
                     snapshot["source"] = "eod"
-                if latest_eod.close_price > 0:
-                    snapshot["referenceClose"] = latest_eod.close_price
+                if reference_eod.close_price > 0:
+                    snapshot["referenceClose"] = reference_eod.close_price
 
             quote = self.market_repo.latest_intraday_quote(to_quote_symbol(symbol))
             if quote:
                 if quote.symbol_name and "name" not in snapshot:
                     snapshot["name"] = quote.symbol_name
                     snapshot["source"] = "intraday"
-                if quote.previous_close > 0 and "referenceClose" not in snapshot:
+                if (
+                    quote.trade_date == target_trade_date
+                    and quote.previous_close > 0
+                    and "referenceClose" not in snapshot
+                ):
                     snapshot["referenceClose"] = quote.previous_close
+                if (
+                    self._is_post_close_snapshot(
+                        quote.trade_date, reference_trade_date, quote.quoted_at
+                    )
+                    and quote.price > 0
+                    and "referenceClose" not in snapshot
+                ):
+                    snapshot["referenceClose"] = quote.price
 
             if allow_remote_fetch and ("name" not in snapshot or "referenceClose" not in snapshot):
                 missing_symbols.append(symbol)
 
         if allow_remote_fetch and missing_symbols:
-            try:
-                fetched_rows = self.quote_client.fetch_quotes_sync(
-                    [to_quote_symbol(symbol) for symbol in sorted(set(missing_symbols))]
-                )
-            except Exception:
-                fetched_rows = []
-
-            for row in fetched_rows:
-                quoted_at = row.updated_at
-                self.market_repo.append_intraday_quote(
-                    {
-                        "symbol": row.symbol,
-                        "name": row.name,
-                        "trade_date": trade_date_of(quoted_at) or target_trade_date,
-                        "price": row.price,
-                        "open": row.open_price,
-                        "previousClose": row.previous_close,
-                        "high": row.high_price,
-                        "low": row.low_price,
-                        "quoted_at": quoted_at,
-                        "source": "tencent_preview_validation",
-                    }
-                )
-                symbol = from_quote_symbol(row.symbol)
+            for symbol in sorted(set(missing_symbols)):
                 snapshot = snapshots.setdefault(symbol, {})
-                if row.name:
-                    snapshot["name"] = row.name
-                    snapshot["source"] = "quote"
-                if row.previous_close > 0:
-                    snapshot["referenceClose"] = row.previous_close
+                if "referenceClose" in snapshot:
+                    continue
+                try:
+                    fetched_bars = self.quote_client.fetch_daily_bars_sync(
+                        symbol,
+                        start_trade_date=reference_trade_date,
+                        end_trade_date=reference_trade_date,
+                    )
+                except Exception:
+                    fetched_bars = []
+                reference_bar = next(
+                    (
+                        row
+                        for row in fetched_bars
+                        if row.trade_date == reference_trade_date and row.close_price > 0
+                    ),
+                    None,
+                )
+                if not reference_bar:
+                    continue
+
+                previous_eod = self.market_repo.previous_eod_price(
+                    symbol, reference_trade_date
+                )
+                self.market_repo.upsert_eod_price(
+                    symbol=symbol,
+                    symbol_name=reference_bar.name,
+                    trade_date=reference_trade_date,
+                    close_price=reference_bar.close_price,
+                    open_price=reference_bar.open_price,
+                    previous_close=previous_eod.close_price if previous_eod else 0,
+                    high_price=reference_bar.high_price,
+                    low_price=reference_bar.low_price,
+                    is_final=True,
+                    source="tencent_preview_validation",
+                )
+                if reference_bar.name:
+                    snapshot["name"] = reference_bar.name
+                snapshot["source"] = "eod"
+                snapshot["referenceClose"] = reference_bar.close_price
+
+            symbols_needing_quote = [
+                symbol
+                for symbol in sorted(set(missing_symbols))
+                if "name" not in snapshots.setdefault(symbol, {})
+                or "referenceClose" not in snapshots.setdefault(symbol, {})
+            ]
+            if symbols_needing_quote:
+                try:
+                    fetched_rows = self.quote_client.fetch_quotes_sync(
+                        [to_quote_symbol(symbol) for symbol in symbols_needing_quote]
+                    )
+                except Exception:
+                    fetched_rows = []
+
+                for row in fetched_rows:
+                    quoted_at = row.updated_at
+                    quote_trade_date = trade_date_of(quoted_at) or target_trade_date
+                    self.market_repo.append_intraday_quote(
+                        {
+                            "symbol": row.symbol,
+                            "name": row.name,
+                            "trade_date": quote_trade_date,
+                            "price": row.price,
+                            "open": row.open_price,
+                            "previousClose": row.previous_close,
+                            "high": row.high_price,
+                            "low": row.low_price,
+                            "quoted_at": quoted_at,
+                            "source": "tencent_preview_validation",
+                        }
+                    )
+                    symbol = from_quote_symbol(row.symbol)
+                    snapshot = snapshots.setdefault(symbol, {})
+                    if row.name and "name" not in snapshot:
+                        snapshot["name"] = row.name
+                        snapshot["source"] = "quote"
+                    if (
+                        quote_trade_date == target_trade_date
+                        and row.previous_close > 0
+                        and "referenceClose" not in snapshot
+                    ):
+                        snapshot["referenceClose"] = row.previous_close
+                    if (
+                        self._is_post_close_snapshot(
+                            quote_trade_date, reference_trade_date, quoted_at
+                        )
+                        and row.price > 0
+                        and "referenceClose" not in snapshot
+                    ):
+                        snapshot["referenceClose"] = row.price
 
         return snapshots
 
@@ -184,7 +271,7 @@ class ImportService:
                     "symbol": symbol,
                     "name": str(snapshot.get("name") or ""),
                     "resolved": bool(snapshot.get("name")),
-                    "previousClose": (
+                    "referenceClose": (
                         float(snapshot["referenceClose"])
                         if "referenceClose" in snapshot
                         else None
@@ -404,7 +491,7 @@ class ImportService:
             target_trade_date,
             mode,
             rows,
-            allow_remote_fetch=False,
+            allow_remote_fetch=True,
         )
         checked_rows = self._attach_symbol_names(target_trade_date, checked_rows)
         preview_rows = [{**row, "tradeDate": target_trade_date} for row in checked_rows]
@@ -435,7 +522,7 @@ class ImportService:
             batch.target_trade_date,
             mode,
             self._rows_from_batch(batch),
-            allow_remote_fetch=False,
+            allow_remote_fetch=True,
         )
         self._update_batch_validation(batch, revalidated_rows)
         if mode != "DRAFT" and any(row["validationStatus"] == "ERROR" for row in revalidated_rows):

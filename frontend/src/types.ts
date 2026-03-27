@@ -153,7 +153,7 @@ export type ResolvedSymbolRow = {
   symbol: string;
   name: string;
   resolved: boolean;
-  previousClose?: number;
+  referenceClose?: number;
   source: "intraday" | "eod" | "quote" | "unknown";
 };
 

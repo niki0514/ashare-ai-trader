@@ -803,7 +803,8 @@ tbody tr:hover,
   border: 1px solid rgba(16, 32, 51, 0.08);
   box-shadow: var(--shadow);
   backdrop-filter: blur(18px);
-  min-height: 100%;
+  min-height: 0;
+  min-width: 0;
 }
 
 .compact-calendar-panel {
@@ -1051,9 +1052,9 @@ tbody tr:hover,
 }
 
 .daily-detail-panel {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
-  grid-template-rows: auto auto minmax(0, 1fr);
   padding: 12px;
   border-radius: 20px;
   background:
@@ -1062,8 +1063,14 @@ tbody tr:hover,
   border: 1px solid rgba(16, 32, 51, 0.08);
   box-shadow: var(--shadow);
   backdrop-filter: blur(18px);
-  overflow: hidden;
-  min-height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  min-height: 0;
+  min-width: 0;
+  height: clamp(540px, calc(100vh - 220px), 860px);
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .daily-detail-header {
@@ -1145,10 +1152,16 @@ tbody tr:hover,
   line-height: 1.1;
 }
 
+.daily-detail-content {
+  flex: 0 0 auto;
+  min-height: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-bottom: 6px;
+}
+
 .daily-detail-table-shell {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  min-height: 0;
   border-radius: 16px;
   border: 1px solid rgba(16, 32, 51, 0.08);
   background: rgba(255, 255, 255, 0.74);
@@ -1167,6 +1180,9 @@ tbody tr:hover,
   padding: 10px 12px;
   background: rgba(16, 32, 51, 0.05);
   border-bottom: 1px solid rgba(16, 32, 51, 0.08);
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .daily-detail-table-head span {
@@ -1180,7 +1196,6 @@ tbody tr:hover,
 
 .daily-detail-table-body {
   min-height: 0;
-  overflow: auto;
 }
 
 .daily-detail-row {
@@ -1905,7 +1920,7 @@ button {
   display: grid;
   grid-template-columns: minmax(0, 1.18fr) minmax(420px, 0.92fr);
   gap: 18px;
-  align-items: stretch;
+  align-items: start;
 }
 
 .pnl-simple-head,
@@ -1919,13 +1934,15 @@ button {
 }
 
 .daily-trades-section {
+  display: grid;
+  gap: 10px;
   margin-top: 20px;
   border-top: 1px solid rgba(16, 32, 51, 0.08);
   padding-top: 16px;
 }
 
 .daily-trades-title {
-  margin: 0 0 10px 4px;
+  margin: 0 0 0 4px;
   font-size: 13px;
   font-weight: 700;
   color: var(--muted);
@@ -1937,4 +1954,20 @@ button {
 .daily-detail-date-block span.down {
   font-weight: 700;
   font-size: 14px;
+}
+
+@media (max-width: 1100px) {
+  .pnl-linked-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .daily-detail-panel {
+    height: min(70vh, 720px);
+  }
+}
+
+@media (max-width: 720px) {
+  .daily-detail-panel {
+    height: min(68vh, 640px);
+  }
 }

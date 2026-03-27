@@ -251,63 +251,65 @@ export function PnlTab({
             </article>
           </div>
 
-          <div className="daily-detail-table-shell">
-            <div className="daily-detail-table-head pnl-simple-head">
-              <span>股票代码</span>
-              <span>名称</span>
-              <span>当日盈亏</span>
-              <span>收益率</span>
-            </div>
-            <div className="daily-detail-table-body">
-              {details.length > 0 ? (
-                details.map((row) => (
-                  <div key={row.symbol} className="daily-detail-row pnl-simple-row">
-                    <span className="detail-cell detail-cell-symbol">{row.symbol}</span>
-                    <span className="detail-cell detail-cell-name">{row.name}</span>
-                    <span className={`detail-cell ${row.dailyPnl >= 0 ? "up" : "down"}`}>
-                      {formatCurrency(row.dailyPnl)}
-                    </span>
-                    <span className={`detail-cell ${row.dailyReturn >= 0 ? "up" : "down"}`}>
-                      {formatPercent(row.dailyReturn)}
-                    </span>
-                  </div>
-                ))
-              ) : (
-                <div className="daily-detail-empty">当日无持仓收益记录</div>
-              )}
-            </div>
-          </div>
-
-          <div className="daily-trades-section">
-            <h4 className="daily-trades-title">成交流水明细</h4>
+          <div className="daily-detail-content">
             <div className="daily-detail-table-shell">
-              <div className="daily-detail-table-head trades-head">
-                <span>成交时间</span>
+              <div className="daily-detail-table-head pnl-simple-head">
                 <span>股票代码</span>
                 <span>名称</span>
-                <span>方向</span>
-                <span>委托价</span>
-                <span>成交价</span>
-                <span>股数</span>
+                <span>当日盈亏</span>
+                <span>收益率</span>
               </div>
               <div className="daily-detail-table-body">
-                {dayTrades.length > 0 ? (
-                  dayTrades.map((trade) => (
-                    <div key={trade.id} className="daily-detail-row trades-row">
-                      <span className="detail-cell">{trade.time.slice(11, 19)}</span>
-                      <span className="detail-cell detail-cell-symbol">{trade.symbol}</span>
-                      <span className="detail-cell detail-cell-name">{trade.name}</span>
-                      <span className={`detail-cell ${trade.side === "BUY" ? "up" : "down"}`}>
-                        {trade.side === "BUY" ? "买入" : "卖出"}
+                {details.length > 0 ? (
+                  details.map((row) => (
+                    <div key={row.symbol} className="daily-detail-row pnl-simple-row">
+                      <span className="detail-cell detail-cell-symbol">{row.symbol}</span>
+                      <span className="detail-cell detail-cell-name">{row.name}</span>
+                      <span className={`detail-cell ${row.dailyPnl >= 0 ? "up" : "down"}`}>
+                        {formatCurrency(row.dailyPnl)}
                       </span>
-                      <span className="detail-cell">{trade.orderPrice.toFixed(2)}</span>
-                      <span className="detail-cell">{trade.fillPrice?.toFixed(2) ?? "-"}</span>
-                      <span className="detail-cell">{formatNumber(trade.shares)}</span>
+                      <span className={`detail-cell ${row.dailyReturn >= 0 ? "up" : "down"}`}>
+                        {formatPercent(row.dailyReturn)}
+                      </span>
                     </div>
                   ))
                 ) : (
-                  <div className="daily-detail-empty">当日无成交记录</div>
+                  <div className="daily-detail-empty">当日无持仓收益记录</div>
                 )}
+              </div>
+            </div>
+
+            <div className="daily-trades-section">
+              <h4 className="daily-trades-title">成交流水明细</h4>
+              <div className="daily-detail-table-shell">
+                <div className="daily-detail-table-head trades-head">
+                  <span>成交时间</span>
+                  <span>股票代码</span>
+                  <span>名称</span>
+                  <span>方向</span>
+                  <span>委托价</span>
+                  <span>成交价</span>
+                  <span>股数</span>
+                </div>
+                <div className="daily-detail-table-body">
+                  {dayTrades.length > 0 ? (
+                    dayTrades.map((trade) => (
+                      <div key={trade.id} className="daily-detail-row trades-row">
+                        <span className="detail-cell">{trade.time.slice(11, 19)}</span>
+                        <span className="detail-cell detail-cell-symbol">{trade.symbol}</span>
+                        <span className="detail-cell detail-cell-name">{trade.name}</span>
+                        <span className={`detail-cell ${trade.side === "BUY" ? "up" : "down"}`}>
+                          {trade.side === "BUY" ? "买入" : "卖出"}
+                        </span>
+                        <span className="detail-cell">{trade.orderPrice.toFixed(2)}</span>
+                        <span className="detail-cell">{trade.fillPrice?.toFixed(2) ?? "-"}</span>
+                        <span className="detail-cell">{formatNumber(trade.shares)}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="daily-detail-empty">当日无成交记录</div>
+                  )}
+                </div>
               </div>
             </div>
           </div>

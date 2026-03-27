@@ -175,7 +175,7 @@ class ResolvedSymbolRow(BaseModel):
     symbol: str
     name: str
     resolved: bool
-    previousClose: float | None = None
+    referenceClose: float | None = None
     source: Literal["intraday", "eod", "quote", "unknown"]
 
 

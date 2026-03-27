@@ -12,7 +12,7 @@ from app.import_io import parse_import_file
 from app.main import app
 from app.market import market_clock, next_trading_date, previous_trading_date
 from app.market_prices import trade_date_of
-from app.quote_client import Quote, TencentQuoteClient
+from app.quote_client import DailyBar, Quote, TencentQuoteClient
 from app.repositories import MarketDataRepository, OrderRepository, PnlRepository, PortfolioRepository, UserRepository
 from app.services import PnlService, QueryService, TradingService
 from app.time_utils import account_bootstrap_time
@@ -198,7 +198,7 @@ def test_resolve_symbols_persists_name_for_later_preview_without_refetch(monkeyp
                 "symbol": "000001",
                 "name": "平安银行",
                 "resolved": True,
-                "previousClose": 10.0,
+                "referenceClose": 10.0,
                 "source": "quote",
             }
         ]
@@ -229,6 +229,169 @@ def test_resolve_symbols_persists_name_for_later_preview_without_refetch(monkeyp
         assert len(latest_rows) == 1
         assert latest_rows[0]["items"][0]["name"] == "平安银行"
         assert fetch_calls == 1
+
+
+def test_preview_import_fetches_missing_reference_close_for_price_limit_validation(
+    monkeypatch,
+) -> None:
+    previous_override = settings.market_now_override
+    quoted_at = datetime.strptime("2026-03-25 12:03:00", "%Y-%m-%d %H:%M:%S")
+    fetch_calls = 0
+
+    def fake_fetch_quotes_sync(self, symbols: list[str]) -> list[Quote]:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        assert symbols == ["sz000001"]
+        return [
+            Quote(
+                symbol="sz000001",
+                name="平安银行",
+                price=10.5,
+                previous_close=10.0,
+                open_price=10.2,
+                high_price=10.8,
+                low_price=9.9,
+                updated_at=quoted_at,
+            )
+        ]
+
+    try:
+        settings.market_now_override = "2026-03-25T12:05:00+08:00"
+        monkeypatch.setattr(TencentQuoteClient, "fetch_quotes_sync", fake_fetch_quotes_sync)
+
+        with TestClient(app) as client:
+            create_response = client.post(
+                "/api/users", json={"name": TEST_USER_NAME, "initialCash": 100000}
+            )
+            assert create_response.status_code == 200
+            user_id = create_response.json()["id"]
+            headers = {"x-user-id": user_id}
+
+            preview_payload = {
+                "targetTradeDate": "2026-03-25",
+                "mode": "DRAFT",
+                "sourceType": "MANUAL",
+                "rows": [
+                    {
+                        "symbol": "000001",
+                        "side": "BUY",
+                        "price": 11.5,
+                        "lots": 1,
+                        "validity": "DAY",
+                    }
+                ],
+            }
+            preview_response = client.post(
+                "/api/imports/preview", json=preview_payload, headers=headers
+            )
+
+            assert preview_response.status_code == 200
+            row = preview_response.json()["rows"][0]
+            assert row["name"] == "平安银行"
+            assert row["validationStatus"] == "ERROR"
+            assert (
+                row["validationMessage"]
+                == "按昨收 10.00 计算，涨跌停区间为 9.00 - 11.00，当前委托价 11.50 超出范围"
+            )
+            assert fetch_calls == 1
+
+        with session_scope() as session:
+            quote = MarketDataRepository(session).latest_intraday_quote("sz000001")
+            assert quote is not None
+            assert quote.previous_close == 10.0
+            assert quote.source == "tencent_preview_validation"
+    finally:
+        settings.market_now_override = previous_override
+
+
+def test_preview_import_uses_previous_trading_day_close_for_future_trade_date(
+    monkeypatch,
+) -> None:
+    previous_override = settings.market_now_override
+
+    def fake_fetch_daily_bars_sync(
+        self,
+        symbol: str,
+        *,
+        start_trade_date: str,
+        end_trade_date: str,
+    ) -> list[DailyBar]:
+        assert symbol == "002460"
+        assert start_trade_date == "2026-03-27"
+        assert end_trade_date == "2026-03-27"
+        return [
+            DailyBar(
+                symbol="002460",
+                name="赣锋锂业",
+                trade_date="2026-03-27",
+                open_price=71.49,
+                close_price=79.67,
+                high_price=79.67,
+                low_price=71.49,
+            )
+        ]
+
+    try:
+        settings.market_now_override = "2026-03-27T15:10:00+08:00"
+        monkeypatch.setattr(
+            TencentQuoteClient, "fetch_daily_bars_sync", fake_fetch_daily_bars_sync
+        )
+
+        with TestClient(app) as client:
+            create_response = client.post(
+                "/api/users", json={"name": TEST_USER_NAME, "initialCash": 100000}
+            )
+            assert create_response.status_code == 200
+            user_id = create_response.json()["id"]
+            headers = {"x-user-id": user_id}
+
+            resolve_response = client.post(
+                "/api/symbols/resolve",
+                json={"targetTradeDate": "2026-03-30", "symbols": ["002460"]},
+                headers=headers,
+            )
+            assert resolve_response.status_code == 200
+            assert resolve_response.json()["rows"] == [
+                {
+                    "symbol": "002460",
+                    "name": "赣锋锂业",
+                    "resolved": True,
+                    "referenceClose": 79.67,
+                    "source": "eod",
+                }
+            ]
+
+            preview_payload = {
+                "targetTradeDate": "2026-03-30",
+                "mode": "DRAFT",
+                "sourceType": "MANUAL",
+                "rows": [
+                    {
+                        "symbol": "002460",
+                        "side": "BUY",
+                        "price": 80.0,
+                        "lots": 1,
+                        "validity": "DAY",
+                    }
+                ],
+            }
+            preview_response = client.post(
+                "/api/imports/preview", json=preview_payload, headers=headers
+            )
+
+            assert preview_response.status_code == 200
+            row = preview_response.json()["rows"][0]
+            assert row["name"] == "赣锋锂业"
+            assert row["validationStatus"] == "VALID"
+            assert row["validationMessage"] == "校验通过"
+
+        with session_scope() as session:
+            eod = MarketDataRepository(session).get_eod_price("002460", "2026-03-27")
+            assert eod is not None
+            assert eod.close_price == 79.67
+            assert eod.source == "tencent_preview_validation"
+    finally:
+        settings.market_now_override = previous_override
 
 
 def test_parse_import_file_uses_validation_message_for_successful_rows() -> None:
@@ -887,6 +1050,167 @@ def test_closed_dashboard_query_finalizes_trade_date_without_engine_tick() -> No
         settings.market_now_override = previous_override
 
 
+def test_daily_detail_excludes_symbols_after_they_are_fully_closed() -> None:
+    with session_scope() as session:
+        user_id = UserRepository(session).create(
+            name=TEST_USER_NAME, initial_cash=100000
+        ).id
+        order_repo = OrderRepository(session)
+        portfolio_repo = PortfolioRepository(session)
+        market_repo = MarketDataRepository(session)
+        pnl_repo = PnlRepository(session)
+        pnl_service = PnlService(session)
+        query_service = QueryService(session)
+
+        initial_time = datetime.strptime("2026-03-24 09:00:00", "%Y-%m-%d %H:%M:%S")
+        buy_time = datetime.strptime("2026-03-24 10:00:00", "%Y-%m-%d %H:%M:%S")
+        sell_time = datetime.strptime("2026-03-25 10:05:00", "%Y-%m-%d %H:%M:%S")
+        portfolio_repo.add_cash_entry(
+            user_id=user_id,
+            entry_time=initial_time,
+            entry_type="INITIAL",
+            amount=100000,
+            reference_type="Bootstrap",
+        )
+
+        buy_order = order_repo.create_order(
+            user_id=user_id,
+            trade_date="2026-03-24",
+            symbol="000001",
+            symbol_name="平安银行",
+            side="BUY",
+            limit_price=10.0,
+            lots=1,
+            validity="DAY",
+            status="filled",
+            status_reason="成交完成",
+            created_at=buy_time,
+        )
+        buy_trade = order_repo.create_trade(
+            user_id=user_id,
+            order_id=buy_order.id,
+            symbol="000001",
+            side="BUY",
+            order_price=10.0,
+            fill_price=10.0,
+            cost_basis_amount=1000.0,
+            realized_pnl=0.0,
+            lots=1,
+            shares=100,
+            fill_time=buy_time,
+            cash_after=99000.0,
+            position_after=100,
+        )
+        portfolio_repo.add_cash_entry(
+            user_id=user_id,
+            entry_time=buy_time,
+            entry_type="BUY",
+            amount=-1000.0,
+            reference_id=buy_trade.id,
+            reference_type="ExecutionTrade",
+        )
+        lot = portfolio_repo.create_position_lot(
+            user_id=user_id,
+            symbol="000001",
+            symbol_name="平安银行",
+            opened_order_id=buy_order.id,
+            opened_trade_id=buy_trade.id,
+            opened_date="2026-03-24",
+            opened_at=buy_time,
+            cost_price=10.0,
+            original_shares=100,
+            remaining_shares=100,
+            sellable_shares=100,
+        )
+
+        market_repo.upsert_eod_price(
+            symbol="000001",
+            symbol_name="平安银行",
+            trade_date="2026-03-24",
+            close_price=10.0,
+            open_price=10.0,
+            previous_close=10.0,
+            high_price=10.0,
+            low_price=10.0,
+            is_final=True,
+            source="test",
+            published_at=datetime.strptime("2026-03-24 15:00:00", "%Y-%m-%d %H:%M:%S"),
+        )
+        pnl_service.recompute_daily_pnl(
+            user_id, "2026-03-24", use_realtime=False, is_final=True
+        )
+
+        sell_order = order_repo.create_order(
+            user_id=user_id,
+            trade_date="2026-03-25",
+            symbol="000001",
+            symbol_name="平安银行",
+            side="SELL",
+            limit_price=11.2,
+            lots=1,
+            validity="DAY",
+            status="filled",
+            status_reason="成交完成",
+            created_at=sell_time,
+        )
+        order_repo.create_trade(
+            user_id=user_id,
+            order_id=sell_order.id,
+            symbol="000001",
+            side="SELL",
+            order_price=11.2,
+            fill_price=11.2,
+            cost_basis_amount=1000.0,
+            realized_pnl=120.0,
+            lots=1,
+            shares=100,
+            fill_time=sell_time,
+            cash_after=100120.0,
+            position_after=0,
+        )
+        portfolio_repo.add_cash_entry(
+            user_id=user_id,
+            entry_time=sell_time,
+            entry_type="SELL",
+            amount=1120.0,
+            reference_id=sell_order.id,
+            reference_type="InstructionOrder",
+        )
+        portfolio_repo.update_lot(
+            lot,
+            remaining_shares=0,
+            sellable_shares=0,
+            closed_at=sell_time,
+        )
+
+        market_repo.upsert_eod_price(
+            symbol="000001",
+            symbol_name="平安银行",
+            trade_date="2026-03-25",
+            close_price=11.2,
+            open_price=10.6,
+            previous_close=10.0,
+            high_price=11.2,
+            low_price=10.5,
+            is_final=True,
+            source="test",
+            published_at=datetime.strptime("2026-03-25 15:00:00", "%Y-%m-%d %H:%M:%S"),
+        )
+        pnl_service.recompute_daily_pnl(
+            user_id, "2026-03-25", use_realtime=False, is_final=True
+        )
+
+        pnl_service.recompute_daily_pnl(
+            user_id, "2026-03-26", use_realtime=False, is_final=True
+        )
+
+        day_after_close = pnl_repo.get_daily_pnl(user_id, "2026-03-26")
+        assert day_after_close is not None
+        assert day_after_close.daily_pnl == pytest.approx(0.0)
+        assert query_service.get_daily_detail(user_id, "2026-03-26") == []
+        assert pnl_repo.list_detail_rows(user_id, "2026-03-26") == []
+
+
 def test_lunch_break_dashboard_persists_non_final_snapshot_but_calendar_stays_final_only() -> None:
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-03-25T12:05:00+08:00"
@@ -1176,6 +1500,108 @@ def test_commit_imports_is_allowed_after_market_close(monkeypatch) -> None:
             with session_scope() as session:
                 order = OrderRepository(session).list_orders(user_id)[0]
                 assert order.symbol_name == "平安银行"
+    finally:
+        settings.market_now_override = previous_override
+
+
+def test_commit_imports_revalidates_with_remote_fetch_when_cached_quote_is_missing(
+    monkeypatch,
+) -> None:
+    previous_override = settings.market_now_override
+    quoted_at = datetime.strptime("2026-03-25 12:06:00", "%Y-%m-%d %H:%M:%S")
+    fetch_calls = 0
+
+    def fake_fetch_quotes_sync(self, symbols: list[str]) -> list[Quote]:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        assert symbols == ["sz000001"]
+        return [
+            Quote(
+                symbol="sz000001",
+                name="平安银行",
+                price=10.5,
+                previous_close=10.0,
+                open_price=10.2,
+                high_price=10.8,
+                low_price=9.9,
+                updated_at=quoted_at,
+            )
+        ]
+
+    try:
+        settings.market_now_override = "2026-03-25T12:05:00+08:00"
+        monkeypatch.setattr(TencentQuoteClient, "fetch_quotes_sync", fake_fetch_quotes_sync)
+
+        with TestClient(app) as client:
+            create_response = client.post(
+                "/api/users", json={"name": TEST_USER_NAME, "initialCash": 100000}
+            )
+            assert create_response.status_code == 200
+            user_id = create_response.json()["id"]
+            headers = {"x-user-id": user_id}
+
+            with session_scope() as session:
+                MarketDataRepository(session).append_intraday_quote(
+                    {
+                        "symbol": "sz000001",
+                        "name": "平安银行",
+                        "trade_date": "2026-03-25",
+                        "price": 10.5,
+                        "open": 10.2,
+                        "previousClose": 10.0,
+                        "high": 10.8,
+                        "low": 9.9,
+                        "quoted_at": datetime.strptime(
+                            "2026-03-25 11:59:00", "%Y-%m-%d %H:%M:%S"
+                        ),
+                        "source": "test",
+                    }
+                )
+
+            preview_payload = {
+                "targetTradeDate": "2026-03-25",
+                "mode": "DRAFT",
+                "sourceType": "MANUAL",
+                "rows": [
+                    {
+                        "symbol": "000001",
+                        "side": "BUY",
+                        "price": 10.5,
+                        "lots": 1,
+                        "validity": "DAY",
+                    }
+                ],
+            }
+            preview_response = client.post(
+                "/api/imports/preview", json=preview_payload, headers=headers
+            )
+            assert preview_response.status_code == 200
+            assert preview_response.json()["rows"][0]["validationStatus"] == "VALID"
+            assert fetch_calls == 0
+            batch_id = preview_response.json()["batchId"]
+
+            with session_scope() as session:
+                market_repo = MarketDataRepository(session)
+                market_repo.delete_intraday_quotes(symbols=["sz000001"])
+                market_repo.delete_eod_prices(symbols=["000001"])
+
+            commit_response = client.post(
+                "/api/imports/commit",
+                json={"batchId": batch_id, "mode": "APPEND"},
+                headers=headers,
+            )
+            assert commit_response.status_code == 200
+            assert fetch_calls == 1
+
+            with session_scope() as session:
+                batch = OrderRepository(session).get_import_batch(batch_id)
+                assert batch is not None
+                assert batch.items[0].validation_status.value == "VALID"
+                assert batch.items[0].validation_message == "校验通过"
+
+                quote = MarketDataRepository(session).latest_intraday_quote("sz000001")
+                assert quote is not None
+                assert quote.source == "tencent_preview_validation"
     finally:
         settings.market_now_override = previous_override
 

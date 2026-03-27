@@ -187,7 +187,11 @@ class PnlService:
         symbols = set(self._build_position_snapshot(user_id, trade_date).keys())
         previous_day = self.pnl_repo.previous_daily_pnl(user_id, trade_date)
         if previous_day:
-            symbols.update(detail.symbol for detail in previous_day.details)
+            symbols.update(
+                detail.symbol
+                for detail in previous_day.details
+                if detail.closing_shares > 0
+            )
         start, end = trade_date_bounds(trade_date)
         stmt = select(ExecutionTrade.symbol).where(
             ExecutionTrade.user_id == user_id,
@@ -304,7 +308,11 @@ class PnlService:
 
         previous_day = self.pnl_repo.previous_daily_pnl(user_id, trade_date)
         first_day = self.pnl_repo.first_daily_pnl(user_id)
-        previous_details = {d.symbol: {"shares": d.closing_shares, "price": d.close_price} for d in (previous_day.details if previous_day else [])}
+        previous_details = {
+            d.symbol: {"shares": d.closing_shares, "price": d.close_price}
+            for d in (previous_day.details if previous_day else [])
+            if d.closing_shares > 0
+        }
 
         start, end = trade_date_bounds(trade_date)
         trades_stmt = (
@@ -355,21 +363,35 @@ class PnlService:
             stat = trade_stats.get(symbol)
 
             closing_shares = current_holding["shares"] if current_holding else 0
+            previous_shares = previous["shares"] if previous else 0
+            buy_shares = stat["buyShares"] if stat else 0
+            buy_amount = stat["buyAmount"] if stat else 0.0
+            sell_shares = stat["sellShares"] if stat else 0
+            sell_amount = stat["sellAmount"] if stat else 0.0
+            realized_cost_basis = stat["costBasisAmount"] if stat else 0.0
+
+            if (
+                previous_shares == 0
+                and closing_shares == 0
+                and buy_shares == 0
+                and sell_shares == 0
+            ):
+                continue
+
             cost_amount = current_holding["costAmount"] if current_holding else 0.0
             fallback_price = (
                 current_holding["fallbackPrice"]
                 if current_holding
                 else (previous["price"] if previous else 0.0)
             )
-            open_price, close_price, market_value = self._price_snapshot(symbol, closing_shares, fallback_price, trade_date, use_realtime)
-
-            previous_shares = previous["shares"] if previous else 0
+            open_price, close_price, market_value = self._price_snapshot(
+                symbol,
+                closing_shares,
+                fallback_price,
+                trade_date,
+                use_realtime,
+            )
             previous_price = previous["price"] if previous else fallback_price
-            buy_shares = stat["buyShares"] if stat else 0
-            buy_amount = stat["buyAmount"] if stat else 0.0
-            sell_shares = stat["sellShares"] if stat else 0
-            sell_amount = stat["sellAmount"] if stat else 0.0
-            realized_cost_basis = stat["costBasisAmount"] if stat else 0.0
 
             avg_sell_price = (sell_amount / sell_shares) if sell_shares else 0.0
             buy_price = (cost_amount / closing_shares) if closing_shares > 0 else ((realized_cost_basis / sell_shares) if sell_shares > 0 else 0.0)

@@ -7,7 +7,7 @@ from sqlalchemy import delete, func, select
 
 from app.db import session_scope
 from app.market import market_clock, next_trading_date, previous_trading_date
-from app.models import DailyPnl, DailyPnlDetail, EodPrice, ExecutionTrade, PositionLot
+from app.models import DailyPnl, DailyPnlDetail, EodPrice, ExecutionTrade
 from app.quote_client import TencentQuoteClient
 from app.repositories import MarketDataRepository, UserRepository
 from app.services import PnlService, SettlementService
@@ -34,26 +34,18 @@ def _load_scope() -> RebuildScope:
     with session_scope() as session:
         user_ids = UserRepository(session).list_user_ids()
         symbols = sorted(
-            {
-                *session.scalars(select(ExecutionTrade.symbol).distinct()).all(),
-                *session.scalars(select(PositionLot.symbol).distinct()).all(),
-            }
+            session.scalars(select(ExecutionTrade.symbol).distinct()).all()
         )
         start_trade_date = session.scalar(
             select(func.min(ExecutionTrade.fill_time))
         )
-        lot_start_trade_date = session.scalar(select(func.min(PositionLot.opened_date)))
-
-    start_candidates = []
-    if start_trade_date is not None:
-        start_candidates.append(start_trade_date.date().isoformat())
-    if lot_start_trade_date is not None:
-        start_candidates.append(lot_start_trade_date)
 
     return RebuildScope(
         user_ids=user_ids,
         symbols=[symbol for symbol in symbols if symbol],
-        historical_start_trade_date=min(start_candidates) if start_candidates else None,
+        historical_start_trade_date=(
+            start_trade_date.date().isoformat() if start_trade_date is not None else None
+        ),
     )
 
 
@@ -157,14 +149,11 @@ def rebuild_derived_data() -> dict:
                     ExecutionTrade.user_id == user_id
                 )
             )
-            if user_start_trade_date is None:
-                user_start_text = session.scalar(
-                    select(func.min(PositionLot.opened_date)).where(
-                        PositionLot.user_id == user_id
-                    )
-                )
-            else:
-                user_start_text = user_start_trade_date.date().isoformat()
+            user_start_text = (
+                user_start_trade_date.date().isoformat()
+                if user_start_trade_date is not None
+                else None
+            )
 
             if not user_start_text:
                 continue

@@ -21,6 +21,7 @@ from .repositories import (
     PnlRepository,
     PortfolioRepository,
     UserRepository,
+    projected_lot_sellable_shares,
 )
 from .time_utils import (
     combine_market_datetime,
@@ -29,6 +30,7 @@ from .time_utils import (
     to_market_iso,
     trade_date_bounds,
 )
+from .trade_execution import record_buy_execution, record_sell_execution
 
 
 def format_dt(value: datetime) -> str:
@@ -521,6 +523,20 @@ class SettlementService:
             return True
         return self.pnl_repo.previous_daily_pnl(user_id, trade_date) is not None
 
+    def _has_post_close_snapshot(self, user_id: str, trade_date: str) -> bool:
+        for symbol in self.pnl_service.trade_date_symbols(user_id, trade_date):
+            current_eod = self.quote_service.market_repo.get_eod_price(symbol, trade_date)
+            if current_eod and current_eod.is_final:
+                continue
+
+            quote = self.quote_service.market_repo.latest_intraday_quote(
+                to_quote_symbol(symbol),
+                trade_date,
+            )
+            if quote is None or quote.quoted_at.strftime("%H:%M:%S") < "15:00:00":
+                return False
+        return True
+
     def expire_day_orders(self, user_id: str, trade_date: str) -> None:
         for order in self.order_repo.list_day_orders_to_expire(user_id, trade_date):
             self.order_repo.update_order_status(
@@ -585,15 +601,28 @@ class SettlementService:
         target_trade_date = previous_trading_date(current_trade_date)
         if self.pnl_repo.get_daily_pnl(user_id, target_trade_date):
             return False
-        if not self.pnl_repo.previous_daily_pnl(user_id, target_trade_date):
+        if not self._should_persist_trade_date(user_id, target_trade_date):
             return False
 
-        can_finalize = self.pnl_service.materialize_trade_date_eod_prices_from_next_day(
-            user_id,
-            target_trade_date,
-            next_trade_date=current_trade_date,
-            source="next_day_previous_close",
-        )
+        can_finalize = False
+        if self._has_post_close_snapshot(user_id, target_trade_date):
+            can_finalize = self.pnl_service.materialize_trade_date_eod_prices(
+                user_id,
+                target_trade_date,
+                is_final=True,
+                source="close_backfill",
+            )
+        if not can_finalize:
+            can_finalize = self.pnl_service.materialize_trade_date_eod_prices_from_next_day(
+                user_id,
+                target_trade_date,
+                next_trade_date=(
+                    current_trade_date
+                    if current_trade_date == next_trading_date(target_trade_date)
+                    else next_trading_date(target_trade_date)
+                ),
+                source="next_day_previous_close",
+            )
         if not can_finalize:
             return False
 
@@ -609,11 +638,9 @@ class SettlementService:
 
     def ensure_session_snapshot(self, user_id: str, market_session) -> dict | None:
         self.backfill_pending_history(user_id, market_session.trade_date)
-        previous_trade_date_backfilled = False
-        if market_session.market_status in {"trading", "lunch_break", "closed"}:
-            previous_trade_date_backfilled = self.backfill_missing_previous_trade_date(
-                user_id, market_session.trade_date
-            )
+        previous_trade_date_backfilled = self.backfill_missing_previous_trade_date(
+            user_id, market_session.trade_date
+        )
 
         if market_session.market_status == "trading":
             if not settings.engine_enabled:
@@ -735,13 +762,21 @@ class QueryService:
         for trade_date in trade_dates:
             self.settlement.expire_day_orders(user_id, trade_date)
 
+    def _positions_sellable_trade_date(self, market_status: str, trade_date: str) -> str:
+        if market_status in {"closed", "weekend", "holiday"}:
+            return next_trading_date(trade_date)
+        return trade_date
+
     def get_positions(self, user_id: str) -> list[dict]:
         self._sync_visible_day_order_statuses(user_id)
         market_session = market_clock.get_session()
         trade_date = market_session.trade_date
+        sellable_trade_date = self._positions_sellable_trade_date(
+            market_session.market_status, trade_date
+        )
         lots = self.portfolio_repo.open_lots(user_id)
         pending_sell = self.portfolio_repo.get_pending_sell_orders_by_symbol(
-            user_id, trade_date
+            user_id, sellable_trade_date
         )
         trade_totals: dict[str, dict[str, Any]] = defaultdict(
             lambda: {
@@ -772,7 +807,9 @@ class QueryService:
 
         grouped: dict[str, dict[str, Any]] = {}
         for lot in lots:
-            projected_sellable = lot.remaining_shares if lot.opened_date < trade_date else lot.sellable_shares
+            projected_sellable = projected_lot_sellable_shares(
+                lot, sellable_trade_date
+            )
             current = grouped.setdefault(
                 lot.symbol,
                 {
@@ -843,6 +880,75 @@ class QueryService:
             )
         rows.sort(key=lambda item: item["marketValue"], reverse=True)
         return rows
+
+    def get_position_detail(self, user_id: str, symbol: str) -> dict:
+        normalized_symbol = symbol.strip().upper()
+        position_by_symbol = {
+            row["symbol"]: row for row in self.get_positions(user_id)
+        }
+        position = position_by_symbol.get(normalized_symbol)
+        if position is None:
+            raise ValueError("持仓不存在")
+
+        market_session = market_clock.get_session()
+        trade_date = market_session.trade_date
+        sellable_trade_date = self._positions_sellable_trade_date(
+            market_session.market_status, trade_date
+        )
+        lots = self.portfolio_repo.open_lots(user_id, normalized_symbol)
+        pending_sell_orders = self.portfolio_repo.get_pending_sell_orders_by_symbol(
+            user_id, sellable_trade_date
+        ).get(normalized_symbol, [])
+
+        remaining_frozen = sum(order.shares for order in pending_sell_orders)
+        last_price = float(position["lastPrice"])
+        lot_rows: list[dict] = []
+        for lot in lots:
+            projected_sellable = projected_lot_sellable_shares(
+                lot, sellable_trade_date
+            )
+            frozen_sell_shares = min(projected_sellable, remaining_frozen)
+            remaining_frozen -= frozen_sell_shares
+            lot_rows.append(
+                {
+                    "id": lot.id,
+                    "openedDate": lot.opened_date,
+                    "openedAt": format_dt(lot.opened_at),
+                    "originalShares": lot.original_shares,
+                    "remainingShares": lot.remaining_shares,
+                    "sellableShares": projected_sellable,
+                    "frozenSellShares": frozen_sell_shares,
+                    "availableSellableShares": max(
+                        0, projected_sellable - frozen_sell_shares
+                    ),
+                    "costPrice": lot.cost_price,
+                    "costAmount": lot.cost_price * lot.remaining_shares,
+                    "marketValue": last_price * lot.remaining_shares,
+                }
+            )
+
+        return {
+            "tradeDate": trade_date,
+            "sellableTradeDate": sellable_trade_date,
+            "marketStatus": market_session.market_status,
+            "position": position,
+            "lots": lot_rows,
+            "pendingSellOrders": [
+                {
+                    "id": order.id,
+                    "tradeDate": order.trade_date,
+                    "orderPrice": order.limit_price,
+                    "lots": order.lots,
+                    "shares": order.shares,
+                    "validity": order.validity.value,
+                    "status": order.status.value,
+                    "statusMessage": order.status_reason or "",
+                    "createdAt": format_dt(order.created_at),
+                    "updatedAt": format_dt(order.updated_at),
+                }
+                for order in pending_sell_orders
+            ],
+        }
 
     def get_closed_positions(self, user_id: str) -> list[dict]:
         self._sync_visible_day_order_statuses(user_id)
@@ -1166,43 +1272,14 @@ class TradingService:
             return
 
         self.order_repo.add_event(order.id, "triggered", "盘中价格达到买入条件")
-        cash_after = available - amount
-        open_shares = sum(l.remaining_shares for l in self.portfolio_repo.open_lots(user_id, order.symbol))
-        trade = self.order_repo.create_trade(
+        fill_time = market_now()
+        trade = record_buy_execution(
+            order_repo=self.order_repo,
+            portfolio_repo=self.portfolio_repo,
             user_id=user_id,
-            order_id=order.id,
-            symbol=order.symbol,
-            side=order.side.value,
-            order_price=order.limit_price,
+            order=order,
             fill_price=price,
-            cost_basis_amount=amount,
-            realized_pnl=0.0,
-            lots=order.lots,
-            shares=order.shares,
-            fill_time=market_now(),
-            cash_after=cash_after,
-            position_after=open_shares + order.shares,
-        )
-        self.portfolio_repo.create_position_lot(
-            user_id=user_id,
-            symbol=order.symbol,
-            symbol_name=order.symbol_name,
-            opened_order_id=order.id,
-            opened_trade_id=trade.id,
-            opened_date=order.trade_date,
-            opened_at=trade.fill_time,
-            cost_price=price,
-            original_shares=order.shares,
-            remaining_shares=order.shares,
-            sellable_shares=0,
-        )
-        self.portfolio_repo.add_cash_entry(
-            user_id=user_id,
-            entry_time=trade.fill_time,
-            entry_type="BUY",
-            amount=-amount,
-            reference_id=order.id,
-            reference_type="InstructionOrder",
+            fill_time=fill_time,
         )
         self.order_repo.add_event(order.id, "filled", f"按 {price:.2f} 成交")
         self.order_repo.update_order_status(order, status="filled", status_reason="成交完成", triggered_at=trade.fill_time, filled_at=trade.fill_time)
@@ -1233,48 +1310,14 @@ class TradingService:
             return
 
         self.order_repo.add_event(order.id, "triggered", "盘中价格达到卖出条件")
-        remaining = order.shares
-        consumed_cost = 0.0
-        for lot in lots:
-            if remaining <= 0:
-                break
-            consumed = min(lot.sellable_shares, remaining)
-            remaining -= consumed
-            consumed_cost += consumed * lot.cost_price
-            self.portfolio_repo.update_lot(
-                lot,
-                remaining_shares=lot.remaining_shares - consumed,
-                sellable_shares=lot.sellable_shares - consumed,
-                closed_at=market_now(),
-            )
-
-        available_cash = self.portfolio_repo.cash_balance(user_id)
-        amount = price * order.shares
-        cash_after = available_cash + amount
-        realized = amount - consumed_cost
-        position_after = sum(l.remaining_shares for l in self.portfolio_repo.open_lots(user_id, order.symbol))
-        trade = self.order_repo.create_trade(
+        fill_time = market_now()
+        trade = record_sell_execution(
+            order_repo=self.order_repo,
+            portfolio_repo=self.portfolio_repo,
             user_id=user_id,
-            order_id=order.id,
-            symbol=order.symbol,
-            side=order.side.value,
-            order_price=order.limit_price,
+            order=order,
             fill_price=price,
-            cost_basis_amount=consumed_cost,
-            realized_pnl=realized,
-            lots=order.lots,
-            shares=order.shares,
-            fill_time=market_now(),
-            cash_after=cash_after,
-            position_after=position_after,
-        )
-        self.portfolio_repo.add_cash_entry(
-            user_id=user_id,
-            entry_time=trade.fill_time,
-            entry_type="SELL",
-            amount=amount,
-            reference_id=order.id,
-            reference_type="InstructionOrder",
+            fill_time=fill_time,
         )
         self.order_repo.add_event(order.id, "filled", f"按 {price:.2f} 成交")
         self.order_repo.update_order_status(order, status="filled", status_reason="成交完成", triggered_at=trade.fill_time, filled_at=trade.fill_time)

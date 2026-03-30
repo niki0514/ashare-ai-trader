@@ -23,6 +23,7 @@ make dev-up
 ```bash
 docker compose up -d postgres
 cd backend
+cp .env.example .env
 uv run python -m devtools.schema init
 ASHARE_RELOAD=true uv run python -m app
 ```
@@ -91,7 +92,8 @@ uv run pytest
 - Users are fully managed in the database; user isolation is supported via request header `X-User-Id`
 - During trading hours, the backend polls Tencent quotes and persists trades in real time
 - At lunch break and market close, the engine freezes the current session prices into the database; outside trading, dashboard reads persisted snapshots instead of request-time quotes
-- The default database is Docker PostgreSQL: `postgresql+psycopg://ashare:ashare@127.0.0.1:5433/ashare_ai_trader`
+- Official dev entrypoints use Docker PostgreSQL: `postgresql+psycopg://ashare:ashare@127.0.0.1:5433/ashare_ai_trader`
+- Ad-hoc `uv run python ...` commands no longer fall back to PostgreSQL; set `ASHARE_DATABASE_URL` explicitly or create `backend/.env` first
 ## PnL Source of Truth
 
 - 当前统一采用 **账户资产变动口径** 作为唯一真值（source of truth）

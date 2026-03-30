@@ -17,6 +17,7 @@ from app.repositories import MarketDataRepository, OrderRepository, PnlRepositor
 from app.services import PnlService, QueryService, TradingService
 from app.time_utils import account_bootstrap_time
 from app.user_service import UserService
+from tests.helpers import create_filled_buy_position, create_filled_sell_execution
 
 
 TEST_USER_NAME = "api-user"
@@ -394,6 +395,241 @@ def test_preview_import_uses_previous_trading_day_close_for_future_trade_date(
         settings.market_now_override = previous_override
 
 
+def test_preview_import_marks_batch_sell_conflict_as_error() -> None:
+    previous_override = settings.market_now_override
+    settings.market_now_override = "2026-03-25T12:05:00+08:00"
+
+    try:
+        with TestClient(app) as client:
+            create_response = client.post(
+                "/api/users", json={"name": TEST_USER_NAME, "initialCash": 100000}
+            )
+            assert create_response.status_code == 200
+            user_id = create_response.json()["id"]
+            headers = {"x-user-id": user_id}
+
+            with session_scope() as session:
+                portfolio_repo = PortfolioRepository(session)
+                market_repo = MarketDataRepository(session)
+                portfolio_repo.add_cash_entry(
+                    user_id=user_id,
+                    entry_time=datetime.strptime("2026-03-25 09:00:00", "%Y-%m-%d %H:%M:%S"),
+                    entry_type="INITIAL",
+                    amount=100000,
+                    reference_type="Bootstrap",
+                )
+                create_filled_buy_position(
+                    order_repo=OrderRepository(session),
+                    portfolio_repo=portfolio_repo,
+                    user_id=user_id,
+                    trade_date="2026-03-24",
+                    fill_time=datetime.strptime(
+                        "2026-03-24 10:00:00", "%Y-%m-%d %H:%M:%S"
+                    ),
+                    symbol="000001",
+                    symbol_name="平安银行",
+                    price=10.0,
+                    lots=10,
+                )
+                market_repo.append_intraday_quote(
+                    {
+                        "symbol": "sz000001",
+                        "name": "平安银行",
+                        "trade_date": "2026-03-25",
+                        "price": 10.5,
+                        "open": 10.2,
+                        "previousClose": 10.0,
+                        "high": 10.8,
+                        "low": 9.9,
+                        "quoted_at": datetime.strptime(
+                            "2026-03-25 12:03:00", "%Y-%m-%d %H:%M:%S"
+                        ),
+                        "source": "test",
+                    }
+                )
+
+            preview_response = client.post(
+                "/api/imports/preview",
+                json={
+                    "targetTradeDate": "2026-03-25",
+                    "mode": "APPEND",
+                    "sourceType": "MANUAL",
+                    "rows": [
+                        {
+                            "symbol": "000001",
+                            "side": "SELL",
+                            "price": 10.5,
+                            "lots": 6,
+                            "validity": "DAY",
+                        },
+                        {
+                            "symbol": "000001",
+                            "side": "SELL",
+                            "price": 10.5,
+                            "lots": 5,
+                            "validity": "DAY",
+                        },
+                    ],
+                },
+                headers=headers,
+            )
+
+            assert preview_response.status_code == 200
+            rows = preview_response.json()["rows"]
+            assert rows[0]["validationStatus"] == "VALID"
+            assert rows[1]["validationStatus"] == "ERROR"
+            assert "本批卖单累计将超出剩余可卖" in rows[1]["validationMessage"]
+    finally:
+        settings.market_now_override = previous_override
+
+
+def test_preview_import_marks_batch_buy_conflict_as_error() -> None:
+    previous_override = settings.market_now_override
+    settings.market_now_override = "2026-03-25T12:05:00+08:00"
+
+    try:
+        with TestClient(app) as client:
+            create_response = client.post(
+                "/api/users", json={"name": TEST_USER_NAME, "initialCash": 10000}
+            )
+            assert create_response.status_code == 200
+            user_id = create_response.json()["id"]
+            headers = {"x-user-id": user_id}
+
+            with session_scope() as session:
+                portfolio_repo = PortfolioRepository(session)
+                market_repo = MarketDataRepository(session)
+                market_repo.append_intraday_quote(
+                    {
+                        "symbol": "sz000001",
+                        "name": "平安银行",
+                        "trade_date": "2026-03-25",
+                        "price": 10.0,
+                        "open": 10.0,
+                        "previousClose": 10.0,
+                        "high": 10.1,
+                        "low": 9.9,
+                        "quoted_at": datetime.strptime(
+                            "2026-03-25 12:03:00", "%Y-%m-%d %H:%M:%S"
+                        ),
+                        "source": "test",
+                    }
+                )
+
+            preview_response = client.post(
+                "/api/imports/preview",
+                json={
+                    "targetTradeDate": "2026-03-25",
+                    "mode": "APPEND",
+                    "sourceType": "MANUAL",
+                    "rows": [
+                        {
+                            "symbol": "000001",
+                            "side": "BUY",
+                            "price": 10.0,
+                            "lots": 6,
+                            "validity": "DAY",
+                        },
+                        {
+                            "symbol": "000001",
+                            "side": "BUY",
+                            "price": 10.0,
+                            "lots": 5,
+                            "validity": "DAY",
+                        },
+                    ],
+                },
+                headers=headers,
+            )
+
+            assert preview_response.status_code == 200
+            rows = preview_response.json()["rows"]
+            assert rows[0]["validationStatus"] == "VALID"
+            assert rows[1]["validationStatus"] == "ERROR"
+            assert "将超出可用现金" in rows[1]["validationMessage"]
+    finally:
+        settings.market_now_override = previous_override
+
+
+def test_commit_imports_requires_warning_confirmation(monkeypatch) -> None:
+    previous_override = settings.market_now_override
+
+    try:
+        settings.market_now_override = "2026-03-25T12:05:00+08:00"
+        monkeypatch.setattr(
+            TencentQuoteClient, "fetch_quotes_sync", lambda self, symbols: []
+        )
+        monkeypatch.setattr(
+            TencentQuoteClient,
+            "fetch_daily_bars_sync",
+            lambda self, symbol, *, start_trade_date, end_trade_date: [],
+        )
+        with TestClient(app) as client:
+            create_response = client.post(
+                "/api/users", json={"name": TEST_USER_NAME, "initialCash": 100000}
+            )
+            assert create_response.status_code == 200
+            user_id = create_response.json()["id"]
+            headers = {"x-user-id": user_id}
+
+            preview_response = client.post(
+                "/api/imports/preview",
+                json={
+                    "targetTradeDate": "2026-03-25",
+                    "mode": "APPEND",
+                    "sourceType": "MANUAL",
+                    "rows": [
+                        {
+                            "symbol": "000001",
+                            "side": "BUY",
+                            "price": 10.0,
+                            "lots": 1,
+                            "validity": "DAY",
+                        }
+                    ],
+                },
+                headers=headers,
+            )
+
+            assert preview_response.status_code == 200
+            preview_body = preview_response.json()
+            assert preview_body["rows"][0]["validationStatus"] == "WARNING"
+            assert preview_body["confirmation"]["required"] is True
+            assert preview_body["confirmation"]["items"] == [
+                {
+                    "code": "MISSING_REFERENCE_CLOSE",
+                    "summary": "暂未获取到昨收盘口径，未校验涨跌停区间",
+                    "rowNumbers": [1],
+                }
+            ]
+
+            missing_confirmation_commit = client.post(
+                "/api/imports/commit",
+                json={"batchId": preview_body["batchId"], "mode": "APPEND"},
+                headers=headers,
+            )
+            assert missing_confirmation_commit.status_code == 409
+            assert (
+                missing_confirmation_commit.json()["detail"]
+                == "存在需确认的警告，请重新校验并确认后再提交"
+            )
+
+            confirmed_commit = client.post(
+                "/api/imports/commit",
+                json={
+                    "batchId": preview_body["batchId"],
+                    "mode": "APPEND",
+                    "confirmWarnings": True,
+                    "confirmationToken": preview_body["confirmation"]["token"],
+                },
+                headers=headers,
+            )
+            assert confirmed_commit.status_code == 200
+            assert confirmed_commit.json()["importedCount"] == 1
+    finally:
+        settings.market_now_override = previous_override
+
+
 def test_parse_import_file_uses_validation_message_for_successful_rows() -> None:
     csv_content = "\n".join(
         [
@@ -541,19 +777,55 @@ def test_positions_project_sellable_shares_by_trade_date() -> None:
             user_id = create_response.json()["id"]
 
             with session_scope() as session:
-                portfolio_repo = PortfolioRepository(session)
-                portfolio_repo.create_position_lot(
+                create_filled_buy_position(
+                    order_repo=OrderRepository(session),
+                    portfolio_repo=PortfolioRepository(session),
                     user_id=user_id,
+                    trade_date="2026-03-18",
+                    fill_time=datetime.strptime(
+                        "2026-03-18 10:00:00", "%Y-%m-%d %H:%M:%S"
+                    ),
                     symbol="000001",
                     symbol_name="平安银行",
-                    opened_order_id=None,
-                    opened_trade_id=None,
-                    opened_date="2026-03-18",
-                    opened_at=datetime.strptime("2026-03-18 10:00:00", "%Y-%m-%d %H:%M:%S"),
-                    cost_price=10.0,
-                    original_shares=1000,
-                    remaining_shares=1000,
-                    sellable_shares=0,
+                    price=10.0,
+                    lots=10,
+                )
+
+            response = client.get("/api/positions", headers={"x-user-id": user_id})
+            assert response.status_code == 200
+            rows = response.json()["rows"]
+            assert len(rows) == 1
+            assert rows[0]["shares"] == 1000
+            assert rows[0]["sellableShares"] == 1000
+    finally:
+        settings.market_now_override = previous_override
+
+
+def test_positions_after_close_project_sellable_shares_for_next_trade_date() -> None:
+    previous_override = settings.market_now_override
+    settings.market_now_override = "2026-03-25T15:10:00+08:00"
+
+    try:
+        with TestClient(app) as client:
+            create_response = client.post(
+                "/api/users", json={"name": TEST_USER_NAME, "initialCash": 100000}
+            )
+            assert create_response.status_code == 200
+            user_id = create_response.json()["id"]
+
+            with session_scope() as session:
+                create_filled_buy_position(
+                    order_repo=OrderRepository(session),
+                    portfolio_repo=PortfolioRepository(session),
+                    user_id=user_id,
+                    trade_date="2026-03-25",
+                    fill_time=datetime.strptime(
+                        "2026-03-25 10:00:00", "%Y-%m-%d %H:%M:%S"
+                    ),
+                    symbol="000001",
+                    symbol_name="平安银行",
+                    price=10.0,
+                    lots=10,
                 )
 
             response = client.get("/api/positions", headers={"x-user-id": user_id})
@@ -590,96 +862,28 @@ def test_positions_use_diluted_cost_basis_and_align_with_dashboard_cumulative_pn
                     "2026-03-24 14:00:00", "%Y-%m-%d %H:%M:%S"
                 )
 
-                buy_order = order_repo.create_order(
+                create_filled_buy_position(
+                    order_repo=order_repo,
+                    portfolio_repo=portfolio_repo,
                     user_id=user_id,
                     trade_date="2026-03-20",
-                    symbol="000001",
-                    symbol_name="平安银行",
-                    side="BUY",
-                    limit_price=10.0,
-                    lots=10,
-                    validity="DAY",
-                    status="filled",
-                    status_reason="成交完成",
-                    created_at=buy_time,
-                )
-                buy_trade = order_repo.create_trade(
-                    user_id=user_id,
-                    order_id=buy_order.id,
-                    symbol="000001",
-                    side="BUY",
-                    order_price=10.0,
-                    fill_price=10.0,
-                    cost_basis_amount=10000.0,
-                    realized_pnl=0.0,
-                    lots=10,
-                    shares=1000,
                     fill_time=buy_time,
-                    cash_after=90000.0,
-                    position_after=1000,
-                )
-                portfolio_repo.add_cash_entry(
-                    user_id=user_id,
-                    entry_time=buy_time,
-                    entry_type="BUY",
-                    amount=-10000.0,
-                    reference_id=buy_trade.id,
-                    reference_type="ExecutionTrade",
-                )
-                lot = portfolio_repo.create_position_lot(
-                    user_id=user_id,
                     symbol="000001",
                     symbol_name="平安银行",
-                    opened_order_id=buy_order.id,
-                    opened_trade_id=buy_trade.id,
-                    opened_date="2026-03-20",
-                    opened_at=buy_time,
-                    cost_price=10.0,
-                    original_shares=1000,
-                    remaining_shares=1000,
+                    price=10.0,
+                    lots=10,
                     sellable_shares=1000,
                 )
-
-                sell_order = order_repo.create_order(
+                create_filled_sell_execution(
+                    order_repo=order_repo,
+                    portfolio_repo=portfolio_repo,
                     user_id=user_id,
                     trade_date="2026-03-24",
+                    fill_time=sell_time,
                     symbol="000001",
                     symbol_name="平安银行",
-                    side="SELL",
-                    limit_price=12.0,
+                    price=12.0,
                     lots=4,
-                    validity="DAY",
-                    status="filled",
-                    status_reason="成交完成",
-                    created_at=sell_time,
-                )
-                sell_trade = order_repo.create_trade(
-                    user_id=user_id,
-                    order_id=sell_order.id,
-                    symbol="000001",
-                    side="SELL",
-                    order_price=12.0,
-                    fill_price=12.0,
-                    cost_basis_amount=4000.0,
-                    realized_pnl=800.0,
-                    lots=4,
-                    shares=400,
-                    fill_time=sell_time,
-                    cash_after=94800.0,
-                    position_after=600,
-                )
-                portfolio_repo.add_cash_entry(
-                    user_id=user_id,
-                    entry_time=sell_time,
-                    entry_type="SELL",
-                    amount=4800.0,
-                    reference_id=sell_trade.id,
-                    reference_type="ExecutionTrade",
-                )
-                portfolio_repo.update_lot(
-                    lot,
-                    remaining_shares=600,
-                    sellable_shares=600,
                 )
 
                 market_repo.upsert_eod_price(
@@ -767,52 +971,16 @@ def test_tick_backfills_missing_previous_trade_day_from_next_day_previous_close(
                 amount=100000,
                 reference_type="Bootstrap",
             )
-            order = order_repo.create_order(
+            create_filled_buy_position(
+                order_repo=order_repo,
+                portfolio_repo=portfolio_repo,
                 user_id=user_id,
                 trade_date="2026-03-18",
-                symbol="000001",
-                symbol_name="平安银行",
-                side="BUY",
-                limit_price=10.0,
-                lots=10,
-                validity="DAY",
-                status="filled",
-                status_reason="成交完成",
-                created_at=fill_time,
-            )
-            order_repo.create_trade(
-                user_id=user_id,
-                order_id=order.id,
-                symbol="000001",
-                side="BUY",
-                order_price=10.0,
-                fill_price=10.0,
-                cost_basis_amount=10000.0,
-                realized_pnl=0.0,
-                lots=10,
-                shares=1000,
                 fill_time=fill_time,
-                cash_after=90000.0,
-                position_after=1000,
-            )
-            portfolio_repo.add_cash_entry(
-                user_id=user_id,
-                entry_time=fill_time,
-                entry_type="BUY",
-                amount=-10000.0,
-                reference_type="ExecutionTrade",
-            )
-            portfolio_repo.create_position_lot(
-                user_id=user_id,
                 symbol="000001",
                 symbol_name="平安银行",
-                opened_order_id=order.id,
-                opened_trade_id=None,
-                opened_date="2026-03-18",
-                opened_at=fill_time,
-                cost_price=10.0,
-                original_shares=1000,
-                remaining_shares=1000,
+                price=10.0,
+                lots=10,
                 sellable_shares=0,
             )
 
@@ -884,6 +1052,142 @@ def test_tick_backfills_missing_previous_trade_day_from_next_day_previous_close(
         settings.market_now_override = previous_override
 
 
+def test_tick_backfills_first_missing_trade_day_without_prior_daily_pnl() -> None:
+    previous_override = settings.market_now_override
+    settings.market_now_override = "2026-03-23T10:00:00+08:00"
+
+    try:
+        with session_scope() as session:
+            user_id = UserRepository(session).create(
+                name=TEST_USER_NAME, initial_cash=100000
+            ).id
+            order_repo = OrderRepository(session)
+            portfolio_repo = PortfolioRepository(session)
+            market_repo = MarketDataRepository(session)
+            pnl_repo = PnlRepository(session)
+
+            initial_time = datetime.strptime("2026-03-20 09:00:00", "%Y-%m-%d %H:%M:%S")
+            fill_time = datetime.strptime("2026-03-20 10:00:00", "%Y-%m-%d %H:%M:%S")
+            portfolio_repo.add_cash_entry(
+                user_id=user_id,
+                entry_time=initial_time,
+                entry_type="INITIAL",
+                amount=100000,
+                reference_type="Bootstrap",
+            )
+            create_filled_buy_position(
+                order_repo=order_repo,
+                portfolio_repo=portfolio_repo,
+                user_id=user_id,
+                trade_date="2026-03-20",
+                fill_time=fill_time,
+                symbol="000001",
+                symbol_name="平安银行",
+                price=10.0,
+                lots=1,
+                sellable_shares=0,
+            )
+            market_repo.append_intraday_quote(
+                {
+                    "symbol": "sz000001",
+                    "name": "平安银行",
+                    "trade_date": "2026-03-23",
+                    "price": 10.8,
+                    "open": 10.6,
+                    "previousClose": 10.5,
+                    "high": 10.9,
+                    "low": 10.4,
+                    "quoted_at": datetime.strptime("2026-03-23 09:35:00", "%Y-%m-%d %H:%M:%S"),
+                    "source": "test",
+                }
+            )
+
+            asyncio.run(
+                TradingService(session).tick(
+                    user_id,
+                    session_info=market_clock.get_session(),
+                    phase_changed=False,
+                )
+            )
+
+            pnl_20 = pnl_repo.get_daily_pnl(user_id, "2026-03-20")
+            assert pnl_20 is not None
+            assert pnl_20.is_final is True
+            assert pnl_20.total_assets == pytest.approx(100050.0)
+            assert pnl_20.daily_pnl == pytest.approx(50.0)
+    finally:
+        settings.market_now_override = previous_override
+
+
+def test_calendar_query_backfills_missing_previous_trade_day_on_weekend() -> None:
+    previous_override = settings.market_now_override
+    settings.market_now_override = "2026-03-28T10:00:00+08:00"
+
+    try:
+        with TestClient(app) as client:
+            create_response = client.post(
+                "/api/users", json={"name": TEST_USER_NAME, "initialCash": 100000}
+            )
+            assert create_response.status_code == 200
+            user_id = create_response.json()["id"]
+            headers = {"x-user-id": user_id}
+
+            with session_scope() as session:
+                order_repo = OrderRepository(session)
+                portfolio_repo = PortfolioRepository(session)
+                market_repo = MarketDataRepository(session)
+                pnl_repo = PnlRepository(session)
+
+                fill_time = datetime.strptime("2026-03-27 10:00:00", "%Y-%m-%d %H:%M:%S")
+                create_filled_buy_position(
+                    order_repo=order_repo,
+                    portfolio_repo=portfolio_repo,
+                    user_id=user_id,
+                    trade_date="2026-03-27",
+                    fill_time=fill_time,
+                    symbol="000001",
+                    symbol_name="平安银行",
+                    price=10.0,
+                    lots=1,
+                    sellable_shares=0,
+                )
+                market_repo.append_intraday_quote(
+                    {
+                        "symbol": "sz000001",
+                        "name": "平安银行",
+                        "trade_date": "2026-03-27",
+                        "price": 10.5,
+                        "open": 10.2,
+                        "previousClose": 10.0,
+                        "high": 10.6,
+                        "low": 10.1,
+                        "quoted_at": datetime.strptime(
+                            "2026-03-27 15:00:00", "%Y-%m-%d %H:%M:%S"
+                        ),
+                        "source": "test",
+                    }
+                )
+
+                assert pnl_repo.get_daily_pnl(user_id, "2026-03-27") is None
+
+            calendar_response = client.get("/api/pnl/calendar", headers=headers)
+            assert calendar_response.status_code == 200
+            rows = calendar_response.json()["rows"]
+            assert len(rows) == 1
+            assert rows[0]["date"] == "2026-03-27"
+            assert rows[0]["dailyPnl"] == pytest.approx(50.0)
+            assert rows[0]["dailyReturn"] == pytest.approx(0.0005)
+            assert rows[0]["tradeCount"] == 1
+
+            with session_scope() as session:
+                row = PnlRepository(session).get_daily_pnl(user_id, "2026-03-27")
+                assert row is not None
+                assert row.is_final is True
+                assert row.daily_pnl == pytest.approx(50.0)
+    finally:
+        settings.market_now_override = previous_override
+
+
 def test_dashboard_returns_server_suggested_import_trade_date() -> None:
     previous_override = settings.market_now_override
 
@@ -945,53 +1249,16 @@ def test_closed_dashboard_query_finalizes_trade_date_without_engine_tick() -> No
                 buy_time = datetime.strptime(
                     "2026-03-24 10:00:00", "%Y-%m-%d %H:%M:%S"
                 )
-                order = order_repo.create_order(
+                create_filled_buy_position(
+                    order_repo=order_repo,
+                    portfolio_repo=portfolio_repo,
                     user_id=user_id,
                     trade_date="2026-03-24",
-                    symbol="000001",
-                    symbol_name="平安银行",
-                    side="BUY",
-                    limit_price=10.0,
-                    lots=10,
-                    validity="DAY",
-                    status="filled",
-                    status_reason="成交完成",
-                    created_at=buy_time,
-                )
-                trade = order_repo.create_trade(
-                    user_id=user_id,
-                    order_id=order.id,
-                    symbol="000001",
-                    side="BUY",
-                    order_price=10.0,
-                    fill_price=10.0,
-                    cost_basis_amount=10000.0,
-                    realized_pnl=0.0,
-                    lots=10,
-                    shares=1000,
                     fill_time=buy_time,
-                    cash_after=90000.0,
-                    position_after=1000,
-                )
-                portfolio_repo.add_cash_entry(
-                    user_id=user_id,
-                    entry_time=buy_time,
-                    entry_type="BUY",
-                    amount=-10000.0,
-                    reference_id=trade.id,
-                    reference_type="ExecutionTrade",
-                )
-                portfolio_repo.create_position_lot(
-                    user_id=user_id,
                     symbol="000001",
                     symbol_name="平安银行",
-                    opened_order_id=order.id,
-                    opened_trade_id=trade.id,
-                    opened_date="2026-03-24",
-                    opened_at=buy_time,
-                    cost_price=10.0,
-                    original_shares=1000,
-                    remaining_shares=1000,
+                    price=10.0,
+                    lots=10,
                     sellable_shares=1000,
                 )
 
@@ -1072,54 +1339,16 @@ def test_daily_detail_excludes_symbols_after_they_are_fully_closed() -> None:
             amount=100000,
             reference_type="Bootstrap",
         )
-
-        buy_order = order_repo.create_order(
+        create_filled_buy_position(
+            order_repo=order_repo,
+            portfolio_repo=portfolio_repo,
             user_id=user_id,
             trade_date="2026-03-24",
-            symbol="000001",
-            symbol_name="平安银行",
-            side="BUY",
-            limit_price=10.0,
-            lots=1,
-            validity="DAY",
-            status="filled",
-            status_reason="成交完成",
-            created_at=buy_time,
-        )
-        buy_trade = order_repo.create_trade(
-            user_id=user_id,
-            order_id=buy_order.id,
-            symbol="000001",
-            side="BUY",
-            order_price=10.0,
-            fill_price=10.0,
-            cost_basis_amount=1000.0,
-            realized_pnl=0.0,
-            lots=1,
-            shares=100,
             fill_time=buy_time,
-            cash_after=99000.0,
-            position_after=100,
-        )
-        portfolio_repo.add_cash_entry(
-            user_id=user_id,
-            entry_time=buy_time,
-            entry_type="BUY",
-            amount=-1000.0,
-            reference_id=buy_trade.id,
-            reference_type="ExecutionTrade",
-        )
-        lot = portfolio_repo.create_position_lot(
-            user_id=user_id,
             symbol="000001",
             symbol_name="平安银行",
-            opened_order_id=buy_order.id,
-            opened_trade_id=buy_trade.id,
-            opened_date="2026-03-24",
-            opened_at=buy_time,
-            cost_price=10.0,
-            original_shares=100,
-            remaining_shares=100,
+            price=10.0,
+            lots=1,
             sellable_shares=100,
         )
 
@@ -1140,47 +1369,16 @@ def test_daily_detail_excludes_symbols_after_they_are_fully_closed() -> None:
             user_id, "2026-03-24", use_realtime=False, is_final=True
         )
 
-        sell_order = order_repo.create_order(
+        create_filled_sell_execution(
+            order_repo=order_repo,
+            portfolio_repo=portfolio_repo,
             user_id=user_id,
             trade_date="2026-03-25",
+            fill_time=sell_time,
             symbol="000001",
             symbol_name="平安银行",
-            side="SELL",
-            limit_price=11.2,
+            price=11.2,
             lots=1,
-            validity="DAY",
-            status="filled",
-            status_reason="成交完成",
-            created_at=sell_time,
-        )
-        order_repo.create_trade(
-            user_id=user_id,
-            order_id=sell_order.id,
-            symbol="000001",
-            side="SELL",
-            order_price=11.2,
-            fill_price=11.2,
-            cost_basis_amount=1000.0,
-            realized_pnl=120.0,
-            lots=1,
-            shares=100,
-            fill_time=sell_time,
-            cash_after=100120.0,
-            position_after=0,
-        )
-        portfolio_repo.add_cash_entry(
-            user_id=user_id,
-            entry_time=sell_time,
-            entry_type="SELL",
-            amount=1120.0,
-            reference_id=sell_order.id,
-            reference_type="InstructionOrder",
-        )
-        portfolio_repo.update_lot(
-            lot,
-            remaining_shares=0,
-            sellable_shares=0,
-            closed_at=sell_time,
         )
 
         market_repo.upsert_eod_price(
@@ -1233,53 +1431,16 @@ def test_lunch_break_dashboard_persists_non_final_snapshot_but_calendar_stays_fi
                 buy_time = datetime.strptime(
                     "2026-03-24 10:00:00", "%Y-%m-%d %H:%M:%S"
                 )
-                order = order_repo.create_order(
+                create_filled_buy_position(
+                    order_repo=order_repo,
+                    portfolio_repo=portfolio_repo,
                     user_id=user_id,
                     trade_date="2026-03-24",
-                    symbol="000001",
-                    symbol_name="平安银行",
-                    side="BUY",
-                    limit_price=10.0,
-                    lots=10,
-                    validity="DAY",
-                    status="filled",
-                    status_reason="成交完成",
-                    created_at=buy_time,
-                )
-                trade = order_repo.create_trade(
-                    user_id=user_id,
-                    order_id=order.id,
-                    symbol="000001",
-                    side="BUY",
-                    order_price=10.0,
-                    fill_price=10.0,
-                    cost_basis_amount=10000.0,
-                    realized_pnl=0.0,
-                    lots=10,
-                    shares=1000,
                     fill_time=buy_time,
-                    cash_after=90000.0,
-                    position_after=1000,
-                )
-                portfolio_repo.add_cash_entry(
-                    user_id=user_id,
-                    entry_time=buy_time,
-                    entry_type="BUY",
-                    amount=-10000.0,
-                    reference_id=trade.id,
-                    reference_type="ExecutionTrade",
-                )
-                portfolio_repo.create_position_lot(
-                    user_id=user_id,
                     symbol="000001",
                     symbol_name="平安银行",
-                    opened_order_id=order.id,
-                    opened_trade_id=trade.id,
-                    opened_date="2026-03-24",
-                    opened_at=buy_time,
-                    cost_price=10.0,
-                    original_shares=1000,
-                    remaining_shares=1000,
+                    price=10.0,
+                    lots=10,
                     sellable_shares=1000,
                 )
 
@@ -1353,7 +1514,7 @@ def test_commit_imports_is_allowed_during_lunch_break() -> None:
 
             preview_payload = {
                 "targetTradeDate": "2026-03-23",
-                "mode": "DRAFT",
+                "mode": "APPEND",
                 "sourceType": "MANUAL",
                 "rows": [
                     {
@@ -1367,11 +1528,17 @@ def test_commit_imports_is_allowed_during_lunch_break() -> None:
             }
             preview_response = client.post("/api/imports/preview", json=preview_payload, headers=headers)
             assert preview_response.status_code == 200
-            batch_id = preview_response.json()["batchId"]
+            preview_body = preview_response.json()
+            batch_id = preview_body["batchId"]
 
             commit_response = client.post(
                 "/api/imports/commit",
-                json={"batchId": batch_id, "mode": "APPEND"},
+                json={
+                    "batchId": batch_id,
+                    "mode": "APPEND",
+                    "confirmWarnings": preview_body["confirmation"]["required"],
+                    "confirmationToken": preview_body["confirmation"]["token"],
+                },
                 headers=headers,
             )
             assert commit_response.status_code == 200
@@ -1776,18 +1943,18 @@ def test_future_day_sell_order_does_not_freeze_today_sellable_shares() -> None:
                 amount=100000,
                 reference_type="Bootstrap",
             )
-            portfolio_repo.create_position_lot(
+            create_filled_buy_position(
+                order_repo=order_repo,
+                portfolio_repo=portfolio_repo,
                 user_id=user_id,
+                trade_date="2026-03-24",
+                fill_time=datetime.strptime(
+                    "2026-03-24 10:00:00", "%Y-%m-%d %H:%M:%S"
+                ),
                 symbol="000001",
                 symbol_name="平安银行",
-                opened_order_id=None,
-                opened_trade_id=None,
-                opened_date="2026-03-24",
-                opened_at=datetime.strptime("2026-03-24 10:00:00", "%Y-%m-%d %H:%M:%S"),
-                cost_price=10.0,
-                original_shares=1000,
-                remaining_shares=1000,
-                sellable_shares=1000,
+                price=10.0,
+                lots=10,
             )
             order_repo.create_order(
                 user_id=user_id,

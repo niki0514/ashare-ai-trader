@@ -70,6 +70,14 @@ def is_order_effective_on_trade_date(order: InstructionOrder, trade_date: str) -
     )
 
 
+def projected_lot_sellable_shares(lot: PositionLot, target_trade_date: str) -> int:
+    return (
+        lot.remaining_shares
+        if lot.opened_date < target_trade_date
+        else lot.sellable_shares
+    )
+
+
 class UserRepository:
     def __init__(self, session: Session):
         self.session = session
@@ -449,17 +457,44 @@ class PortfolioRepository:
         entry_time: datetime,
         entry_type: str,
         amount: float,
-        reference_id: str | None = None,
         reference_type: str | None = None,
     ) -> CashLedger:
+        normalized_entry_type = CashEntryType(entry_type)
+        if normalized_entry_type in {CashEntryType.BUY, CashEntryType.SELL}:
+            raise ValueError("Trade cash entries must be created via add_trade_cash_entry")
         row = CashLedger(
             id=new_id("cash"),
             user_id=user_id,
             entry_time=entry_time,
-            entry_type=CashEntryType(entry_type),
+            entry_type=normalized_entry_type,
+            amount=amount,
+            reference_id=None,
+            reference_type=reference_type,
+        )
+        self.session.add(row)
+        self.session.flush()
+        return row
+
+    def add_trade_cash_entry(
+        self,
+        *,
+        user_id: str,
+        entry_time: datetime,
+        entry_type: str,
+        amount: float,
+        reference_id: str,
+    ) -> CashLedger:
+        normalized_entry_type = CashEntryType(entry_type)
+        if normalized_entry_type not in {CashEntryType.BUY, CashEntryType.SELL}:
+            raise ValueError("Only BUY/SELL cash entries can reference ExecutionTrade")
+        row = CashLedger(
+            id=new_id("cash"),
+            user_id=user_id,
+            entry_time=entry_time,
+            entry_type=normalized_entry_type,
             amount=amount,
             reference_id=reference_id,
-            reference_type=reference_type,
+            reference_type="ExecutionTrade",
         )
         self.session.add(row)
         self.session.flush()
@@ -488,8 +523,8 @@ class PortfolioRepository:
         user_id: str,
         symbol: str,
         symbol_name: str | None,
-        opened_order_id: str | None,
-        opened_trade_id: str | None,
+        opened_order_id: str,
+        opened_trade_id: str,
         opened_date: str,
         opened_at: datetime,
         cost_price: float,

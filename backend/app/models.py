@@ -3,7 +3,19 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -143,14 +155,36 @@ class ExecutionTrade(Base):
 
 class PositionLot(Base):
     __tablename__ = "position_lots"
-    __table_args__ = (Index("ix_position_lots_user_symbol_status", "user_id", "symbol", "status"),)
+    __table_args__ = (
+        Index("ix_position_lots_user_symbol_status", "user_id", "symbol", "status"),
+        CheckConstraint(
+            "original_shares > 0",
+            name="ck_position_lots_original_shares_positive",
+        ),
+        CheckConstraint(
+            "remaining_shares >= 0 AND remaining_shares <= original_shares",
+            name="ck_position_lots_remaining_shares_bounds",
+        ),
+        CheckConstraint(
+            "sellable_shares >= 0 AND sellable_shares <= remaining_shares",
+            name="ck_position_lots_sellable_shares_bounds",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     symbol: Mapped[str] = mapped_column(String(16))
     symbol_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    opened_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    opened_trade_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    opened_order_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("instruction_orders.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    opened_trade_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("execution_trades.id", ondelete="CASCADE"),
+        nullable=False,
+    )
     opened_date: Mapped[str] = mapped_column(String(10))
     opened_at: Mapped[datetime] = mapped_column(DateTime)
     cost_price: Mapped[float] = mapped_column(Float)
@@ -163,14 +197,30 @@ class PositionLot(Base):
 
 class CashLedger(Base):
     __tablename__ = "cash_ledger"
-    __table_args__ = (Index("ix_cash_ledger_user_time", "user_id", "entry_time"),)
+    __table_args__ = (
+        Index("ix_cash_ledger_user_time", "user_id", "entry_time"),
+        CheckConstraint(
+            "(entry_type NOT IN ('BUY', 'SELL')) OR "
+            "(reference_type = 'ExecutionTrade' AND reference_id IS NOT NULL)",
+            name="ck_cash_ledger_trade_entries_reference_execution_trade",
+        ),
+        CheckConstraint(
+            "(reference_id IS NULL) OR "
+            "(entry_type IN ('BUY', 'SELL') AND reference_type = 'ExecutionTrade')",
+            name="ck_cash_ledger_reference_id_trade_only",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     entry_time: Mapped[datetime] = mapped_column(DateTime, default=market_now)
     entry_type: Mapped[CashEntryType] = mapped_column(Enum(CashEntryType))
     amount: Mapped[float] = mapped_column(Float)
-    reference_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reference_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("execution_trades.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     reference_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 

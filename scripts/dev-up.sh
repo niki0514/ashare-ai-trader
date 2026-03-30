@@ -6,9 +6,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 POSTGRES_CONTAINER="ashare-postgres"
+DEFAULT_DEV_DATABASE_URL="postgresql+psycopg://ashare:ashare@127.0.0.1:5433/ashare_ai_trader"
 
 BACKEND_PID=""
 FRONTEND_PID=""
+
+export ASHARE_DATABASE_URL="${ASHARE_DATABASE_URL:-$DEFAULT_DEV_DATABASE_URL}"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then

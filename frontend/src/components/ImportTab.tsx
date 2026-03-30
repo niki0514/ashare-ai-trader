@@ -17,8 +17,10 @@ import {
 } from "../importHelpers";
 import { ImportManualGrid } from "./ImportManualGrid";
 import { ImportOrdersPanel, type ImportOrderFilter } from "./ImportOrdersPanel";
+import { ImportWarningConfirmModal } from "./ImportWarningConfirmModal";
 import { isImportBlockedMarketStatus, isNonTradingMarketStatus } from "../orderHelpers";
 import type {
+  ImportPreviewConfirmation,
   ImportPreviewRow,
   LatestImportBatch,
   MarketStatus,
@@ -43,6 +45,7 @@ type PreviewedManualBatch = {
   rowIds: string[];
   batchId: string;
   rows: ImportPreviewRow[];
+  confirmation: ImportPreviewConfirmation;
 };
 
 function hasResolvedManualName(name: string, symbol: string) {
@@ -151,6 +154,10 @@ export function ImportTab({
   const [workflowFeedback, setWorkflowFeedback] = useState<{
     tone: "success" | "error";
     text: string;
+  } | null>(null);
+  const [warningConfirmation, setWarningConfirmation] = useState<{
+    batches: PreviewedManualBatch[];
+    currentRowsSnapshot: ManualInputRow[];
   } | null>(null);
   const [isDraftDirty, setIsDraftDirty] = useState(false);
   const [draftFileName, setDraftFileName] = useState<string>("");
@@ -580,12 +587,7 @@ export function ImportTab({
     fileName,
     savedAt,
   }: {
-    batches: Array<{
-      tradeDate: string;
-      rowIds: string[];
-      batchId: string;
-      rows: ImportPreviewRow[];
-    }>;
+    batches: PreviewedManualBatch[];
     successText: string;
     fileName?: string;
     savedAt?: string;
@@ -705,6 +707,7 @@ export function ImportTab({
           rowIds: group.items.map((item) => item.rowId),
           batchId: response.batchId,
           rows: response.rows,
+          confirmation: response.confirmation,
         };
       }),
     );
@@ -729,6 +732,80 @@ export function ImportTab({
     setIsDraftDirty(true);
 
     return { remainingTouchedCount: remainingTouchedRows.length };
+  }
+
+  async function commitPreviewedBatches(
+    selectedBatches: PreviewedManualBatch[],
+    currentRowsSnapshot: ManualInputRow[],
+    options: { confirmWarnings: boolean },
+  ) {
+    const { confirmWarnings } = options;
+    let importedCount = 0;
+    const committedBatches: PreviewedManualBatch[] = [];
+
+    try {
+      for (const batch of selectedBatches) {
+        const response = await api.commitImports({
+          batchId: batch.batchId,
+          mode: "APPEND",
+          confirmWarnings: confirmWarnings && batch.confirmation.required,
+          confirmationToken:
+            confirmWarnings && batch.confirmation.required
+              ? batch.confirmation.token
+              : undefined,
+        });
+        importedCount += response.importedCount;
+        committedBatches.push(batch);
+      }
+
+      const { remainingTouchedCount } = await syncRowsAfterCommit(
+        currentRowsSnapshot,
+        committedBatches,
+      );
+      setWarningConfirmation(null);
+      setWorkflowFeedback({
+        tone: "success",
+        text:
+          remainingTouchedCount > 0
+            ? `已提交 ${importedCount} 条，未选记录已保留为草稿。`
+            : `已提交 ${importedCount} 条，已生成委托记录，可在下方查看状态。`,
+      });
+      try {
+        await onImportCommitted();
+      } catch {
+        // Keep the import workflow successful even if the follow-up refresh fails.
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "提交导入失败";
+      let feedbackText = message;
+
+      if (committedBatches.length > 0) {
+        try {
+          await syncRowsAfterCommit(currentRowsSnapshot, committedBatches);
+        } catch (syncError) {
+          const fallbackMessage =
+            syncError instanceof Error ? syncError.message : "剩余草稿同步失败";
+          applyLocalCommitFallback(currentRowsSnapshot, committedBatches);
+          feedbackText = `已提交 ${importedCount} 条，剩余提交失败：${message}；${fallbackMessage}`;
+        }
+        if (feedbackText === message) {
+          feedbackText = `已提交 ${importedCount} 条，剩余提交失败：${message}`;
+        }
+        try {
+          await onImportCommitted();
+        } catch {
+          // Keep the partial-submit feedback focused on the import result itself.
+        }
+      } else if (message.includes("请重新校验") || message.includes("需确认的警告")) {
+        resetValidationState();
+      }
+
+      setWarningConfirmation(null);
+      setWorkflowFeedback({
+        tone: "error",
+        text: feedbackText,
+      });
+    }
   }
 
   async function syncRowsAfterCommit(
@@ -916,9 +993,7 @@ export function ImportTab({
     setWorkflowFeedback(null);
     setSubmittingImport(true);
 
-    let importedCount = 0;
     const currentRowsSnapshot = manualRows;
-    const committedBatches: PreviewedManualBatch[] = [];
 
     try {
       const selectedBatches = await previewManualBatches(selectedManualRowsByTradeDate, "APPEND");
@@ -935,60 +1010,52 @@ export function ImportTab({
         return;
       }
 
-      for (const batch of selectedBatches) {
-        const response = await api.commitImports({
-          batchId: batch.batchId,
-          mode: "APPEND",
+      const hasConfirmationWarnings = selectedBatches.some(
+        (batch) => batch.confirmation.required,
+      );
+      setManualRowsFromPreviewBatches(selectedBatches, true);
+
+      if (hasConfirmationWarnings) {
+        setWarningConfirmation({
+          batches: selectedBatches,
+          currentRowsSnapshot,
         });
-        importedCount += response.importedCount;
-        committedBatches.push(batch);
+        return;
       }
 
-      const { remainingTouchedCount } = await syncRowsAfterCommit(
-        currentRowsSnapshot,
-        committedBatches,
-      );
-      setWorkflowFeedback({
-        tone: "success",
-        text:
-          remainingTouchedCount > 0
-            ? `已提交 ${importedCount} 条，未选记录已保留为草稿。`
-            : `已提交 ${importedCount} 条，已生成委托记录，可在下方查看状态。`,
+      await commitPreviewedBatches(selectedBatches, currentRowsSnapshot, {
+        confirmWarnings: false,
       });
-      try {
-        await onImportCommitted();
-      } catch {
-        // Keep the import workflow successful even if the follow-up refresh fails.
-      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "提交导入失败";
-      let feedbackText = message;
-
-      if (committedBatches.length > 0) {
-        try {
-          await syncRowsAfterCommit(currentRowsSnapshot, committedBatches);
-        } catch (syncError) {
-          const fallbackMessage =
-            syncError instanceof Error ? syncError.message : "剩余草稿同步失败";
-          applyLocalCommitFallback(currentRowsSnapshot, committedBatches);
-          feedbackText = `已提交 ${importedCount} 条，剩余提交失败：${message}；${fallbackMessage}`;
-        }
-        if (feedbackText === message) {
-          feedbackText = `已提交 ${importedCount} 条，剩余提交失败：${message}`;
-        }
-        try {
-          await onImportCommitted();
-        } catch {
-          // Keep the partial-submit feedback focused on the import result itself.
-        }
-      } else if (message.includes("请重新校验")) {
+      if (message.includes("请重新校验") || message.includes("需确认的警告")) {
         resetValidationState();
       }
-
       setWorkflowFeedback({
         tone: "error",
-        text: feedbackText,
+        text: message,
       });
+    } finally {
+      setSubmittingImport(false);
+    }
+  }
+
+  async function handleConfirmWarnings() {
+    if (!warningConfirmation) {
+      return;
+    }
+
+    setWorkflowFeedback(null);
+    setSubmittingImport(true);
+
+    try {
+      await commitPreviewedBatches(
+        warningConfirmation.batches,
+        warningConfirmation.currentRowsSnapshot,
+        {
+          confirmWarnings: true,
+        },
+      );
     } finally {
       setSubmittingImport(false);
     }
@@ -1012,8 +1079,9 @@ export function ImportTab({
   }
 
   return (
-    <section className="import-layout">
-      <article className="input-card import-workflow-card">
+    <>
+      <section className="import-layout">
+        <article className="input-card import-workflow-card">
         <div className="input-card-head import-toolbar-head">
           <div className="import-section-copy">
             <h3>操作录入</h3>
@@ -1102,14 +1170,28 @@ export function ImportTab({
           </div>
           {importSubmitHint ? <div className="import-submit-hint">{importSubmitHint}</div> : null}
         </div>
-      </article>
-      <ImportOrdersPanel
-        pendingOrders={pendingOrders}
-        orderFilter={orderFilter}
-        deletingOrderId={deletingOrderId}
-        onOrderFilterChange={setOrderFilter}
-        onDeleteOrder={handleDeleteOrder}
-      />
-    </section>
+        </article>
+        <ImportOrdersPanel
+          pendingOrders={pendingOrders}
+          orderFilter={orderFilter}
+          deletingOrderId={deletingOrderId}
+          onOrderFilterChange={setOrderFilter}
+          onDeleteOrder={handleDeleteOrder}
+        />
+      </section>
+      {warningConfirmation ? (
+        <ImportWarningConfirmModal
+          batches={warningConfirmation.batches
+            .filter((batch) => batch.confirmation.items.length > 0)
+            .map((batch) => ({
+              tradeDate: batch.tradeDate,
+              items: batch.confirmation.items,
+            }))}
+          loading={submittingImport}
+          onCancel={() => setWarningConfirmation(null)}
+          onConfirm={handleConfirmWarnings}
+        />
+      ) : null}
+    </>
   );
 }

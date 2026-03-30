@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 from app.quote_client import to_quote_symbol
 from app.repositories import MarketDataRepository, OrderRepository, PortfolioRepository
+from app.trade_execution import record_buy_execution, record_sell_execution
 
 
 TEST_USER_ID = "test-user"
@@ -249,29 +250,14 @@ def seed_trades(
             timestamps["triggered"],
         )
 
-        available_cash = portfolio_repo.cash_balance(user_id)
-
         if trade.side == "BUY":
-            amount = trade.fill_price * trade.shares
-            cash_after = available_cash - amount
-            open_shares = sum(
-                lot.remaining_shares
-                for lot in portfolio_repo.open_lots(user_id, trade.symbol)
-            )
-            created_trade = order_repo.create_trade(
+            record_buy_execution(
+                order_repo=order_repo,
+                portfolio_repo=portfolio_repo,
                 user_id=user_id,
-                order_id=order.id,
-                symbol=trade.symbol,
-                side=trade.side,
-                order_price=trade.order_price,
+                order=order,
                 fill_price=trade.fill_price,
-                cost_basis_amount=amount,
-                realized_pnl=0,
-                lots=trade.lots,
-                shares=trade.shares,
                 fill_time=fill_time,
-                cash_after=cash_after,
-                position_after=open_shares + trade.shares,
             )
             order_repo.add_event(
                 order.id,
@@ -286,67 +272,15 @@ def seed_trades(
                 triggered_at=timestamps["triggered"],
                 filled_at=timestamps["filled"],
             )
-            portfolio_repo.add_cash_entry(
-                user_id=user_id,
-                entry_time=fill_time,
-                entry_type="BUY",
-                amount=-amount,
-                reference_id=created_trade.id,
-                reference_type="ExecutionTrade",
-            )
-            portfolio_repo.create_position_lot(
-                user_id=user_id,
-                symbol=trade.symbol,
-                symbol_name=trade.name,
-                opened_order_id=order.id,
-                opened_trade_id=created_trade.id,
-                opened_date=trade_date,
-                opened_at=fill_time,
-                cost_price=trade.fill_price,
-                original_shares=trade.shares,
-                remaining_shares=trade.shares,
-                sellable_shares=0,
-            )
             continue
 
-        amount = trade.fill_price * trade.shares
-        remaining_to_sell = trade.shares
-        cost_basis_amount = 0.0
-        position_after = 0
-        for lot in portfolio_repo.open_lots(user_id, trade.symbol):
-            if remaining_to_sell <= 0:
-                position_after += lot.remaining_shares
-                continue
-            consumed = min(lot.remaining_shares, remaining_to_sell)
-            remaining = lot.remaining_shares - consumed
-            cost_basis_amount += consumed * lot.cost_price
-            remaining_to_sell -= consumed
-            portfolio_repo.update_lot(
-                lot,
-                remaining_shares=remaining,
-                sellable_shares=remaining,
-                closed_at=fill_time if remaining == 0 else None,
-            )
-            position_after += remaining
-        if remaining_to_sell != 0:
-            raise ValueError(f"Insufficient seeded position for {trade.symbol}")
-
-        cash_after = available_cash + amount
-        realized_pnl = amount - cost_basis_amount
-        created_trade = order_repo.create_trade(
+        record_sell_execution(
+            order_repo=order_repo,
+            portfolio_repo=portfolio_repo,
             user_id=user_id,
-            order_id=order.id,
-            symbol=trade.symbol,
-            side=trade.side,
-            order_price=trade.order_price,
+            order=order,
             fill_price=trade.fill_price,
-            cost_basis_amount=cost_basis_amount,
-            realized_pnl=realized_pnl,
-            lots=trade.lots,
-            shares=trade.shares,
             fill_time=fill_time,
-            cash_after=cash_after,
-            position_after=position_after,
         )
         order_repo.add_event(
             order.id, "filled", f"按 {trade.fill_price:.2f} 成交", timestamps["filled"]
@@ -357,12 +291,4 @@ def seed_trades(
             status_reason="成交完成",
             triggered_at=timestamps["triggered"],
             filled_at=timestamps["filled"],
-        )
-        portfolio_repo.add_cash_entry(
-            user_id=user_id,
-            entry_time=fill_time,
-            entry_type="SELL",
-            amount=amount,
-            reference_id=created_trade.id,
-            reference_type="ExecutionTrade",
         )

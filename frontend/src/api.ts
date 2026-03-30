@@ -196,7 +196,12 @@ export const api = {
         timeoutMs: FILE_REQUEST_TIMEOUT_MS,
       },
     ),
-  commitImports: (payload: { batchId: string; mode: ImportMode }) =>
+  commitImports: (payload: {
+    batchId: string;
+    mode: ImportMode;
+    confirmWarnings?: boolean;
+    confirmationToken?: string;
+  }) =>
     request<ImportCommitResponse>("/imports/commit", {
       method: "POST",
       body: JSON.stringify(payload)

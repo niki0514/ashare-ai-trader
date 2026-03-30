@@ -90,8 +90,8 @@ export function PositionsTab({
         <h3>挂单明细</h3>
         <span>
           {activePendingOrders.length > 0
-            ? `当前 ${formatNumber(activePendingOrders.length)} 条当日待执行委托`
-            : "当前无当日待执行挂单"}
+            ? `当前 ${formatNumber(activePendingOrders.length)} 条生效中的待执行委托`
+            : "当前无生效中的待执行挂单"}
         </span>
       </div>
       <div className="pending-sections">

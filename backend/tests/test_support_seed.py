@@ -18,6 +18,7 @@ from app.repositories import (
 from devtools.sample_account import seed_sample_account
 from devtools.rebuild_derived_data import rebuild_derived_data
 from devtools.restore_test_user import restore_test_user
+from tests.helpers import create_filled_buy_position
 
 
 LEGACY_USER_NAME = "legacy-user"
@@ -179,55 +180,16 @@ def test_rebuild_derived_data_preserves_users_and_trade_facts(monkeypatch) -> No
                 amount=100000,
                 reference_type="Bootstrap",
             )
-            order = order_repo.create_order(
+            create_filled_buy_position(
+                order_repo=order_repo,
+                portfolio_repo=portfolio_repo,
                 user_id=user_id,
                 trade_date="2026-03-24",
-                symbol="000001",
-                symbol_name="平安银行",
-                side="BUY",
-                limit_price=10.0,
-                lots=1,
-                validity="DAY",
-                status="filled",
-                status_reason="成交完成",
-                created_at=datetime.strptime(
-                    "2026-03-24 10:00:00", "%Y-%m-%d %H:%M:%S"
-                ),
-            )
-            trade = order_repo.create_trade(
-                user_id=user_id,
-                order_id=order.id,
-                symbol="000001",
-                side="BUY",
-                order_price=10.0,
-                fill_price=10.0,
-                cost_basis_amount=1000.0,
-                realized_pnl=0.0,
-                lots=1,
-                shares=100,
                 fill_time=datetime.strptime("2026-03-24 10:00:00", "%Y-%m-%d %H:%M:%S"),
-                cash_after=99000.0,
-                position_after=100,
-            )
-            portfolio_repo.add_cash_entry(
-                user_id=user_id,
-                entry_time=datetime.strptime("2026-03-24 10:00:00", "%Y-%m-%d %H:%M:%S"),
-                entry_type="BUY",
-                amount=-1000.0,
-                reference_id=trade.id,
-                reference_type="ExecutionTrade",
-            )
-            portfolio_repo.create_position_lot(
-                user_id=user_id,
                 symbol="000001",
                 symbol_name="平安银行",
-                opened_order_id=order.id,
-                opened_trade_id=trade.id,
-                opened_date="2026-03-24",
-                opened_at=datetime.strptime("2026-03-24 10:00:00", "%Y-%m-%d %H:%M:%S"),
-                cost_price=10.0,
-                original_shares=100,
-                remaining_shares=100,
+                price=10.0,
+                lots=1,
                 sellable_shares=100,
             )
 

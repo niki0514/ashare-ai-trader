@@ -22,11 +22,15 @@ from .schemas import (
     ImportCommitResponse,
     ImportPreviewResponse,
     ImportUploadResponse,
+    PositionDetailResponse,
+    PositionsResponse,
     PreviewImportsRequest,
     QuoteResponse,
     ResolveSymbolsRequest,
     ResolveSymbolsResponse,
+    SubmitOperationsRequest,
     UserSummary,
+    ValidateOperationsRequest,
 )
 from .services import (
     OrderService,
@@ -81,6 +85,23 @@ def _serialize_user(user) -> UserSummary:
     )
 
 
+def _manual_preview_rows(target_trade_date: str, rows) -> list[dict]:
+    return [
+        {
+            "rowNumber": idx + 1,
+            "tradeDate": target_trade_date,
+            "symbol": row.symbol,
+            "side": row.side,
+            "price": row.price,
+            "lots": row.lots,
+            "validity": row.validity,
+            "validationStatus": "VALID",
+            "validationMessage": "校验通过",
+        }
+        for idx, row in enumerate(rows)
+    ]
+
+
 def get_user_id(x_user_id: str | None = Header(default=None), db: Session = Depends(get_db)) -> str:
     try:
         return UserService(db).resolve_user_id(x_user_id)
@@ -113,9 +134,17 @@ def get_dashboard(db: Session = Depends(get_db), user_id: str = Depends(get_user
     return QueryService(db).get_dashboard(user_id)
 
 
-@app.get("/api/positions")
+@app.get("/api/positions", response_model=PositionsResponse)
 def get_positions(db: Session = Depends(get_db), user_id: str = Depends(get_user_id)):
     return {"rows": QueryService(db).get_positions(user_id)}
+
+
+@app.get("/api/positions/{symbol}/detail", response_model=PositionDetailResponse)
+def get_position_detail(symbol: str, db: Session = Depends(get_db), user_id: str = Depends(get_user_id)):
+    try:
+        return QueryService(db).get_position_detail(user_id, symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/positions/closed")
@@ -172,20 +201,7 @@ def resolve_symbols(
 
 @app.post("/api/imports/preview", response_model=ImportPreviewResponse)
 def preview_imports(payload: PreviewImportsRequest, db: Session = Depends(get_db), user_id: str = Depends(get_user_id)):
-    rows = [
-        {
-            "rowNumber": idx + 1,
-            "tradeDate": payload.targetTradeDate,
-            "symbol": row.symbol,
-            "side": row.side,
-            "price": row.price,
-            "lots": row.lots,
-            "validity": row.validity,
-            "validationStatus": "VALID",
-            "validationMessage": "校验通过",
-        }
-        for idx, row in enumerate(payload.rows)
-    ]
+    rows = _manual_preview_rows(payload.targetTradeDate, payload.rows)
     result = ImportService(db).create_import_preview(
         user_id=user_id,
         target_trade_date=payload.targetTradeDate,
@@ -195,6 +211,23 @@ def preview_imports(payload: PreviewImportsRequest, db: Session = Depends(get_db
         rows=rows,
     )
     return result
+
+
+@app.post("/api/operations/validate", response_model=ImportPreviewResponse)
+def validate_operations(
+    payload: ValidateOperationsRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    rows = _manual_preview_rows(payload.targetTradeDate, payload.rows)
+    return ImportService(db).create_import_preview(
+        user_id=user_id,
+        target_trade_date=payload.targetTradeDate,
+        source_type="MANUAL",
+        file_name=None,
+        mode=payload.mode,
+        rows=rows,
+    )
 
 
 @app.post("/api/imports/upload", response_model=ImportUploadResponse)
@@ -255,12 +288,40 @@ def commit_imports(payload: CommitImportsRequest, db: Session = Depends(get_db),
     if not market_clock.is_import_window_open():
         raise HTTPException(status_code=403, detail="当前为交易时段，仅允许在休盘时提交导入")
     try:
-        result = ImportService(db).commit_import_batch(user_id, payload.batchId, payload.mode)
+        result = ImportService(db).commit_import_batch(
+            user_id,
+            payload.batchId,
+            payload.mode,
+            confirm_warnings=payload.confirmWarnings,
+            confirmation_token=payload.confirmationToken,
+        )
     except ValueError as exc:
         detail = str(exc)
         status_code = 404 if detail == "Import batch not found" else 409
         raise HTTPException(status_code=status_code, detail=detail) from exc
     return result
+
+
+@app.post("/api/operations/submit", response_model=ImportCommitResponse)
+def submit_operations(
+    payload: SubmitOperationsRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    if not market_clock.is_import_window_open():
+        raise HTTPException(status_code=403, detail="当前为交易时段，仅允许在休盘时提交导入")
+    try:
+        return ImportService(db).commit_import_batch(
+            user_id,
+            payload.batchId,
+            payload.mode,
+            confirm_warnings=payload.confirmWarnings,
+            confirmation_token=payload.confirmationToken,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 404 if detail == "Import batch not found" else 409
+        raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
 @app.get("/api/imports/latest")

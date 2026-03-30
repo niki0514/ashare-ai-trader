@@ -127,12 +127,25 @@ export type ImportPreviewRow = {
   validationMessage: string;
 };
 
+export type ImportPreviewConfirmationItem = {
+  code: string;
+  summary: string;
+  rowNumbers: number[];
+};
+
+export type ImportPreviewConfirmation = {
+  required: boolean;
+  token?: string;
+  items: ImportPreviewConfirmationItem[];
+};
+
 export type ImportPreviewResponse = {
   batchId: string;
   targetTradeDate: string;
   fileName?: string;
   sourceType?: "MANUAL" | "XLSX" | "CSV";
   rows: ImportPreviewRow[];
+  confirmation: ImportPreviewConfirmation;
 };
 
 export type ImportUploadResponse = {

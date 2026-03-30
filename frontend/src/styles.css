@@ -213,6 +213,11 @@ table {
   padding: 22px;
 }
 
+.warning-confirmation-modal {
+  width: min(100%, 640px);
+  padding: 22px;
+}
+
 .modal-head {
   display: flex;
   justify-content: space-between;
@@ -290,6 +295,50 @@ table {
   justify-content: flex-end;
   gap: 10px;
   padding-top: 4px;
+}
+
+.warning-confirmation-body {
+  display: grid;
+  gap: 14px;
+  max-height: min(52vh, 420px);
+  overflow: auto;
+  margin-bottom: 18px;
+}
+
+.warning-confirmation-group {
+  display: grid;
+  gap: 10px;
+}
+
+.warning-confirmation-group h4 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.warning-confirmation-list {
+  display: grid;
+  gap: 10px;
+}
+
+.warning-confirmation-item {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(16, 32, 51, 0.08);
+  background: rgba(246, 248, 252, 0.92);
+}
+
+.warning-confirmation-item strong {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.warning-confirmation-item span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .section-head h2,

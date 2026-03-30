@@ -479,7 +479,11 @@ export default function App() {
           <PositionsTab
             rows={positions}
             pendingOrders={pendingOrders}
-            currentTradeDate={dashboard.tradeDate}
+            currentTradeDate={
+              isNonTradingMarketStatus(dashboard.marketStatus)
+                ? dashboard.suggestedImportTradeDate
+                : dashboard.tradeDate
+            }
             deletingOrderId={deletingPendingOrderId}
             onDeleteOrder={handleDeletePendingOrder}
           />

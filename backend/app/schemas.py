@@ -50,6 +50,61 @@ class PendingOrderRow(BaseModel):
     detail: PendingOrderDetail
 
 
+class PositionRow(BaseModel):
+    symbol: str
+    name: str
+    shares: int
+    sellableShares: int
+    frozenSellShares: int
+    costPrice: float
+    lastPrice: float
+    marketValue: float
+    pnl: float
+    returnRate: float
+    todayPnl: float
+    todayReturn: float
+
+
+class PositionLotDetailRow(BaseModel):
+    id: str
+    openedDate: str
+    openedAt: str
+    originalShares: int
+    remainingShares: int
+    sellableShares: int
+    frozenSellShares: int
+    availableSellableShares: int
+    costPrice: float
+    costAmount: float
+    marketValue: float
+
+
+class PositionPendingSellOrderRow(BaseModel):
+    id: str
+    tradeDate: str
+    orderPrice: float
+    lots: int
+    shares: int
+    validity: Literal["DAY", "GTC"]
+    status: Literal["confirmed", "pending", "triggered"]
+    statusMessage: str
+    createdAt: str
+    updatedAt: str
+
+
+class PositionsResponse(BaseModel):
+    rows: list[PositionRow]
+
+
+class PositionDetailResponse(BaseModel):
+    tradeDate: str
+    sellableTradeDate: str
+    marketStatus: MarketStatus
+    position: PositionRow
+    lots: list[PositionLotDetailRow]
+    pendingSellOrders: list[PositionPendingSellOrderRow]
+
+
 class HistoryRow(BaseModel):
     id: str
     time: str
@@ -128,12 +183,25 @@ class ImportPreviewRow(BaseModel):
     validationMessage: str
 
 
+class ImportPreviewConfirmationItem(BaseModel):
+    code: str
+    summary: str
+    rowNumbers: list[int]
+
+
+class ImportPreviewConfirmation(BaseModel):
+    required: bool
+    token: str | None = None
+    items: list[ImportPreviewConfirmationItem]
+
+
 class ImportPreviewResponse(BaseModel):
     batchId: str
     targetTradeDate: str
     fileName: str | None = None
     sourceType: Literal["MANUAL", "XLSX", "CSV"] | None = None
     rows: list[ImportPreviewRow]
+    confirmation: ImportPreviewConfirmation
 
 
 class ImportUploadResponse(BaseModel):
@@ -166,6 +234,12 @@ class PreviewImportsRequest(BaseModel):
     rows: list[ManualImportRowInput]
 
 
+class ValidateOperationsRequest(BaseModel):
+    targetTradeDate: str
+    mode: Literal["DRAFT", "OVERWRITE", "APPEND"] = "APPEND"
+    rows: list[ManualImportRowInput]
+
+
 class ResolveSymbolsRequest(BaseModel):
     targetTradeDate: str
     symbols: list[str]
@@ -186,6 +260,15 @@ class ResolveSymbolsResponse(BaseModel):
 class CommitImportsRequest(BaseModel):
     batchId: str
     mode: Literal["OVERWRITE", "APPEND", "DRAFT"] = "DRAFT"
+    confirmWarnings: bool = False
+    confirmationToken: str | None = None
+
+
+class SubmitOperationsRequest(BaseModel):
+    batchId: str
+    mode: Literal["OVERWRITE", "APPEND"] = "APPEND"
+    confirmWarnings: bool = False
+    confirmationToken: str | None = None
 
 
 class QuoteResponse(BaseModel):

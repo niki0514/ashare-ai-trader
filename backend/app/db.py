@@ -6,14 +6,14 @@ from contextlib import contextmanager
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-from .config import settings
+from .config import require_database_url
 
 
 class Base(DeclarativeBase):
     pass
 
 
-engine = create_engine(settings.database_url, future=True)
+engine = create_engine(require_database_url(), future=True)
 SessionLocal = sessionmaker(
     bind=engine,
     autoflush=False,

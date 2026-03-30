@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
+import hashlib
+import json
 import re
 
 from sqlalchemy.orm import Session
@@ -16,10 +18,13 @@ from .repositories import (
     OrderRepository,
     PortfolioRepository,
     is_order_effective_on_trade_date,
+    projected_lot_sellable_shares,
 )
 
 
 SYMBOL_PATTERN = re.compile(r"^\d{6}$")
+WARNING_CODE_MISSING_REFERENCE_CLOSE = "MISSING_REFERENCE_CLOSE"
+WARNING_CODE_OVERWRITE_ACTIVE_ORDERS = "OVERWRITE_ACTIVE_ORDERS"
 
 
 class ImportService:
@@ -39,6 +44,7 @@ class ImportService:
             if row["validationStatus"] != "ERROR" and not SYMBOL_PATTERN.fullmatch(symbol):
                 next_row["validationStatus"] = "ERROR"
                 next_row["validationMessage"] = "股票代码必须为 6 位数字"
+                next_row.pop("validationCode", None)
             output.append(next_row)
         return output
 
@@ -53,8 +59,93 @@ class ImportService:
             if row["validationStatus"] != "ERROR":
                 next_row["validationStatus"] = "ERROR"
                 next_row["validationMessage"] = trade_date_error
+                next_row.pop("validationCode", None)
             output.append(next_row)
         return output
+
+    @staticmethod
+    def _warning_confirmation_payload(
+        *,
+        user_id: str,
+        target_trade_date: str,
+        mode: str,
+        items: list[dict],
+    ) -> dict:
+        if not items:
+            return {"required": False, "token": None, "items": []}
+
+        token_payload = {
+            "userId": user_id,
+            "targetTradeDate": target_trade_date,
+            "mode": mode,
+            "items": items,
+        }
+        token = hashlib.sha256(
+            json.dumps(token_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return {"required": True, "token": token, "items": items}
+
+    def _target_trade_date_active_orders(
+        self, user_id: str, target_trade_date: str
+    ) -> list:
+        return [
+            order
+            for order in self.order_repo.list_orders(
+                user_id,
+                statuses=ACTIVE_ORDER_STATUSES,
+            )
+            if order.trade_date == target_trade_date
+        ]
+
+    def _build_warning_confirmation(
+        self,
+        *,
+        user_id: str,
+        target_trade_date: str,
+        mode: str,
+        rows: list[dict],
+    ) -> dict:
+        grouped_row_numbers: dict[tuple[str, str], list[int]] = defaultdict(list)
+        for row in rows:
+            if row.get("validationStatus") != "WARNING":
+                continue
+            code = str(row.get("validationCode") or "GENERIC_WARNING")
+            summary = str(row.get("validationMessage") or "存在需确认的警告")
+            grouped_row_numbers[(code, summary)].append(int(row["rowNumber"]))
+
+        items = [
+            {
+                "code": code,
+                "summary": summary,
+                "rowNumbers": sorted(row_numbers),
+            }
+            for (code, summary), row_numbers in sorted(
+                grouped_row_numbers.items(), key=lambda item: (item[0][0], item[0][1])
+            )
+        ]
+
+        if mode == "OVERWRITE":
+            replaced_orders = self._target_trade_date_active_orders(
+                user_id, target_trade_date
+            )
+            if replaced_orders:
+                items.append(
+                    {
+                        "code": WARNING_CODE_OVERWRITE_ACTIVE_ORDERS,
+                        "summary": (
+                            f"继续提交将覆盖 {target_trade_date} 的 "
+                            f"{len(replaced_orders)} 条已生效委托"
+                        ),
+                        "rowNumbers": [],
+                    }
+                )
+
+        return self._warning_confirmation_payload(
+            user_id=user_id,
+            target_trade_date=target_trade_date,
+            mode=mode,
+            items=items,
+        )
 
     @staticmethod
     def _limit_ratio(symbol: str, symbol_name: str | None) -> Decimal:
@@ -309,6 +400,7 @@ class ImportService:
                 if not snapshot or "referenceClose" not in snapshot:
                     next_row["validationStatus"] = "WARNING"
                     next_row["validationMessage"] = "暂未获取到昨收盘口径，未校验涨跌停区间"
+                    next_row["validationCode"] = WARNING_CODE_MISSING_REFERENCE_CLOSE
                 else:
                     reference_close = Decimal(str(snapshot["referenceClose"]))
                     ratio = self._limit_ratio(symbol, str(snapshot.get("name", "")))
@@ -320,6 +412,7 @@ class ImportService:
                         next_row["validationMessage"] = (
                             f"按昨收 {reference_close:.2f} 计算，涨跌停区间为 {lower:.2f} - {upper:.2f}，当前委托价 {price:.2f} 超出范围"
                         )
+                        next_row.pop("validationCode", None)
             output.append(next_row)
         return output
 
@@ -346,8 +439,9 @@ class ImportService:
     ) -> list[dict]:
         sellable_by_symbol: dict[str, int] = defaultdict(int)
         for lot in self.portfolio_repo.open_lots(user_id):
-            projected_sellable = lot.remaining_shares if lot.opened_date < target_trade_date else lot.sellable_shares
-            sellable_by_symbol[lot.symbol] += projected_sellable
+            sellable_by_symbol[lot.symbol] += projected_lot_sellable_shares(
+                lot, target_trade_date
+            )
 
         reserved_by_symbol: dict[str, int] = defaultdict(int)
         for order in self._active_orders(user_id, target_trade_date, mode):
@@ -384,10 +478,11 @@ class ImportService:
                         f"当前剩余可卖仅 {available // 100} 手（{available} 股），另有 {reserved // 100} 手已被已有挂单占用"
                     )
                 elif batch_reserved + shares > available:
-                    next_row["validationStatus"] = "WARNING"
+                    next_row["validationStatus"] = "ERROR"
                     next_row["validationMessage"] = (
                         f"本批卖单累计将超出剩余可卖，当前剩余可卖 {available // 100} 手，前序已占用 {batch_reserved // 100} 手"
                     )
+                    next_row.pop("validationCode", None)
                 reserved_lots[symbol] = batch_reserved + shares
             output.append(next_row)
         return output
@@ -419,10 +514,11 @@ class ImportService:
                         f"按委托价估算需 {row_amount:.2f} 元，当前可用现金仅 {available_cash:.2f} 元"
                     )
                 elif row_amount > remaining_cash:
-                    next_row["validationStatus"] = "WARNING"
+                    next_row["validationStatus"] = "ERROR"
                     next_row["validationMessage"] = (
                         f"与现有/本批买单合计后将超出可用现金，当前剩余可用 {remaining_cash:.2f} 元"
                     )
+                    next_row.pop("validationCode", None)
                 batch_buy_amount += row_amount
             output.append(next_row)
         return output
@@ -493,6 +589,12 @@ class ImportService:
             rows,
             allow_remote_fetch=True,
         )
+        confirmation = self._build_warning_confirmation(
+            user_id=user_id,
+            target_trade_date=target_trade_date,
+            mode=mode,
+            rows=checked_rows,
+        )
         checked_rows = self._attach_symbol_names(target_trade_date, checked_rows)
         preview_rows = [{**row, "tradeDate": target_trade_date} for row in checked_rows]
         batch = self.order_repo.create_import_batch(
@@ -509,9 +611,18 @@ class ImportService:
             "fileName": file_name,
             "sourceType": source_type,
             "rows": preview_rows,
+            "confirmation": confirmation,
         }
 
-    def commit_import_batch(self, user_id: str, batch_id: str, mode: str) -> dict:
+    def commit_import_batch(
+        self,
+        user_id: str,
+        batch_id: str,
+        mode: str,
+        *,
+        confirm_warnings: bool = False,
+        confirmation_token: str | None = None,
+    ) -> dict:
         batch = self.order_repo.get_import_batch(batch_id)
         if not batch or batch.user_id != user_id:
             raise ValueError("Import batch not found")
@@ -525,8 +636,24 @@ class ImportService:
             allow_remote_fetch=True,
         )
         self._update_batch_validation(batch, revalidated_rows)
+        confirmation = self._build_warning_confirmation(
+            user_id=user_id,
+            target_trade_date=batch.target_trade_date,
+            mode=mode,
+            rows=revalidated_rows,
+        )
         if mode != "DRAFT" and any(row["validationStatus"] == "ERROR" for row in revalidated_rows):
             raise ValueError("导入批次校验已变化，请重新校验后再提交")
+        if (
+            mode != "DRAFT"
+            and confirmation["required"]
+            and (
+                not confirm_warnings
+                or not confirmation_token
+                or confirmation_token != confirmation["token"]
+            )
+        ):
+            raise ValueError("存在需确认的警告，请重新校验并确认后再提交")
         imported = self.order_repo.commit_import_batch(batch, mode)
         return {
             "batchId": batch.id,

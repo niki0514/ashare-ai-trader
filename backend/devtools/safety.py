@@ -8,7 +8,7 @@ from app.db import engine
 
 
 def _masked_database_url() -> str:
-    url = settings.database_url
+    url = settings.database_url or ""
     if engine.dialect.name == "sqlite":
         return url
 

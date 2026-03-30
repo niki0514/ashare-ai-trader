@@ -35,12 +35,14 @@ make dev-up
 ```bash
 docker compose up -d postgres
 cd backend
+cp .env.example .env
+uv run python -m devtools.schema init
 ASHARE_RELOAD=true uv run python -m app
 ```
 
 服务默认监听：`http://localhost:3101`
 
-默认数据库为 Docker PostgreSQL：
+官方开发入口使用 Docker PostgreSQL：
 
 ```bash
 postgresql+psycopg://ashare:ashare@127.0.0.1:5433/ashare_ai_trader
@@ -50,7 +52,9 @@ postgresql+psycopg://ashare:ashare@127.0.0.1:5433/ashare_ai_trader
 - 如果你想把 backend/frontend 一起跑在 Docker 里并保留热更新，可在项目根目录执行 `make dev-docker-up`
 - 当前应用启动不再自动执行任何 schema 初始化
 - 如果要切换到别的数据库，直接设置 `ASHARE_DATABASE_URL`
+- 任意 `uv run python ...` 临时脚本如果没有显式 `ASHARE_DATABASE_URL`，现在会直接失败，不再静默回落到 PostgreSQL
 - 如果你连接的是新的空数据库，需要先在库外执行 `uv run python -m devtools.schema init`
+- 如果你想长期保留本地连接配置，可先复制 `cp .env.example .env`
 - Docker PostgreSQL 数据保存在固定 volume `ashare-ai-trader_ashare_postgres_data`，容器重启不会影响业务数据
 - 后端开发工具中已不再提供任何“删库重建”入口
 - 如果你要恢复本地 `Test User` 测试数据，可执行 `ASHARE_CONFIRM_RESTORE_TEST_USER=1 uv run python -m devtools.restore_test_user`

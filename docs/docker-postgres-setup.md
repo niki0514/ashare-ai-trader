@@ -44,19 +44,21 @@ docker compose up -d postgres
 
 ```bash
 cd backend
+cp .env.example .env
 uv run python -m devtools.schema init
 ASHARE_RELOAD=true uv run python -m app
 ```
 
-## 默认连接
+## 推荐连接
 
-后端默认连接：
+官方开发入口会显式使用：
 
 ```bash
 postgresql+psycopg://ashare:ashare@127.0.0.1:5433/ashare_ai_trader
 ```
 
 如果你要改连接串，在 `backend/.env` 中覆盖 `ASHARE_DATABASE_URL` 即可。
+任意临时 `uv run python ...` 命令如果没有显式数据库连接，现在会直接失败，不再静默写入默认 PostgreSQL。
 
 当前默认持久化卷名为：
 

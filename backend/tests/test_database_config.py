@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from app.db import engine
+
 
 def test_importing_db_without_database_url_fails_fast(tmp_path: Path) -> None:
     backend_dir = Path(__file__).resolve().parents[1]
@@ -23,3 +25,7 @@ def test_importing_db_without_database_url_fails_fast(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "ASHARE_DATABASE_URL is not configured" in (result.stdout + result.stderr)
+
+
+def test_database_engine_uses_connection_pre_ping() -> None:
+    assert engine.pool._pre_ping is True

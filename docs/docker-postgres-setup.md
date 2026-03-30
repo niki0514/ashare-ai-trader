@@ -101,6 +101,24 @@ ashare-ai-trader_ashare_postgres_data
 docker compose ps
 ```
 
+导出当前数据库备份：
+
+```bash
+./scripts/backup-db.sh
+```
+
+恢复某个备份：
+
+```bash
+./scripts/restore-db.sh backups/ashare_ai_trader_YYYYMMDD_HHMMSS.dump
+```
+
+如果要在另一台机器上恢复数据库后，再用本地环境启动 backend/frontend：
+
+```bash
+./scripts/dev-up.sh backups/ashare_ai_trader_YYYYMMDD_HHMMSS.dump
+```
+
 查看 PostgreSQL 日志：
 
 ```bash

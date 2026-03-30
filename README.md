@@ -68,6 +68,60 @@ make dev-docker-down
 make dev-docker-logs
 ```
 
+## 数据库备份与迁移
+
+备份当前 Docker PostgreSQL：
+
+```bash
+make db-backup
+```
+
+或直接执行：
+
+```bash
+./scripts/backup-db.sh
+```
+
+备份文件会写到仓库根目录的 `backups/`，格式为：
+
+```text
+backups/ashare_ai_trader_YYYYMMDD_HHMMSS.dump
+```
+
+如果你要把项目迁移到另一台机器，并继续用本地 `uv`/`npm` 启动前后端：
+
+1. 把仓库和对应的 `.dump` 备份文件一起拷过去
+2. 在新机器上安装好 `docker`、`uv`、`npm`
+3. 在新机器上执行：
+
+```bash
+./scripts/dev-up.sh backups/ashare_ai_trader_YYYYMMDD_HHMMSS.dump
+```
+
+这个脚本会自动：
+
+- 启动 Docker PostgreSQL
+- 恢复备份
+- 本地启动 backend
+- 本地启动 frontend
+
+默认访问地址：
+
+- Frontend: `http://localhost:5174`
+- Backend: `http://localhost:3101`
+
+如果你只想恢复数据库，不立刻启动前后端：
+
+```bash
+make db-restore BACKUP=backups/ashare_ai_trader_YYYYMMDD_HHMMSS.dump
+```
+
+如果你想通过 Make 启动“恢复后本地启动”的完整流程：
+
+```bash
+make migrate-up BACKUP=backups/ashare_ai_trader_YYYYMMDD_HHMMSS.dump
+```
+
 ## 数据安全
 
 - PostgreSQL 使用固定命名卷 `ashare-ai-trader_ashare_postgres_data`，避免因 Compose 项目名变化误连到新空卷

@@ -7,6 +7,7 @@ BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 POSTGRES_CONTAINER="ashare-postgres"
 DEFAULT_DEV_DATABASE_URL="postgresql+psycopg://ashare:ashare@127.0.0.1:5433/ashare_ai_trader"
+BACKUP_FILE="${1:-}"
 
 BACKEND_PID=""
 FRONTEND_PID=""
@@ -93,6 +94,20 @@ monitor_processes() {
   done
 }
 
+restore_backup_if_requested() {
+  if [[ -z "$BACKUP_FILE" ]]; then
+    return 0
+  fi
+
+  if [[ ! -f "$BACKUP_FILE" ]]; then
+    echo "Backup file not found: $BACKUP_FILE" >&2
+    exit 1
+  fi
+
+  echo "Restoring database from $BACKUP_FILE ..."
+  ASHARE_COMPOSE_FILE=docker-compose.yml "$ROOT_DIR/scripts/restore-db.sh" "$BACKUP_FILE"
+}
+
 require_command docker
 require_command uv
 require_command npm
@@ -116,6 +131,8 @@ echo "Starting PostgreSQL container..."
 
 echo "Waiting for PostgreSQL to become healthy..."
 wait_for_postgres
+
+restore_backup_if_requested
 
 echo "Ensuring backend schema exists..."
 init_backend_schema

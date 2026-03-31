@@ -4,6 +4,7 @@ import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from threading import Lock
 from typing import Any
 
 from sqlalchemy import and_, select
@@ -64,6 +65,21 @@ def engine_sleep_seconds(now: datetime | None = None) -> float:
         target = current
 
     return max(0.5, (target - current).total_seconds())
+
+
+class SnapshotLockRegistry:
+    _registry_lock = Lock()
+    _locks: dict[tuple[str, str], Lock] = {}
+
+    @classmethod
+    def acquire(cls, user_id: str, trade_date: str) -> Lock:
+        key = (user_id, trade_date)
+        with cls._registry_lock:
+            lock = cls._locks.get(key)
+            if lock is None:
+                lock = Lock()
+                cls._locks[key] = lock
+            return lock
 
 
 class QuoteService:
@@ -518,6 +534,9 @@ class SettlementService:
             # instead of failing the whole request when the upstream quote source blips.
             return
 
+    def _snapshot_lock(self, user_id: str, trade_date: str) -> Lock:
+        return SnapshotLockRegistry.acquire(user_id, trade_date)
+
     def _should_persist_trade_date(self, user_id: str, trade_date: str) -> bool:
         if self.pnl_service.trade_date_symbols(user_id, trade_date):
             return True
@@ -558,30 +577,60 @@ class SettlementService:
         existing = self.pnl_repo.get_daily_pnl(user_id, trade_date)
         if existing and existing.is_final and not force_recompute:
             return self._payload_from_daily(existing)
-        if not force_recompute and not self._should_persist_trade_date(
-            user_id, trade_date
-        ):
-            return None
 
-        if refresh_quotes:
-            self._refresh_trade_date_quotes(user_id, trade_date)
+        with self._snapshot_lock(user_id, trade_date):
+            existing = self.pnl_repo.get_daily_pnl(user_id, trade_date)
+            if existing and existing.is_final and not force_recompute:
+                return self._payload_from_daily(existing)
+            if not force_recompute and not self._should_persist_trade_date(
+                user_id, trade_date
+            ):
+                return None
 
-        can_finalize = self.pnl_service.materialize_trade_date_eod_prices(
-            user_id,
-            trade_date,
-            is_final=True,
-            source=source,
-        )
-        payload = self.pnl_service.recompute_daily_pnl(
-            user_id,
-            trade_date,
-            use_realtime=False,
-            is_final=can_finalize,
-            persist=True,
-        )
-        if can_finalize:
-            self.expire_day_orders(user_id, trade_date)
-        return payload
+            if refresh_quotes:
+                self._refresh_trade_date_quotes(user_id, trade_date)
+
+            can_finalize = self.pnl_service.materialize_trade_date_eod_prices(
+                user_id,
+                trade_date,
+                is_final=True,
+                source=source,
+            )
+            payload = self.pnl_service.recompute_daily_pnl(
+                user_id,
+                trade_date,
+                use_realtime=False,
+                is_final=can_finalize,
+                persist=True,
+            )
+            if can_finalize:
+                self.expire_day_orders(user_id, trade_date)
+            self.session.commit()
+            return payload
+
+    def ensure_non_final_snapshot(self, user_id: str, trade_date: str) -> dict | None:
+        existing = self.pnl_repo.get_daily_pnl(user_id, trade_date)
+        if existing and not existing.is_final:
+            return self._payload_from_daily(existing)
+
+        with self._snapshot_lock(user_id, trade_date):
+            existing = self.pnl_repo.get_daily_pnl(user_id, trade_date)
+            if existing and not existing.is_final:
+                return self._payload_from_daily(existing)
+            if not self._should_persist_trade_date(user_id, trade_date):
+                return None
+
+            # Publish the snapshot before releasing the single-flight lock so
+            # concurrent readers can observe and reuse it immediately.
+            payload = self.pnl_service.recompute_daily_pnl(
+                user_id,
+                trade_date,
+                use_realtime=True,
+                is_final=False,
+                persist=True,
+            )
+            self.session.commit()
+            return payload
 
     def backfill_pending_history(self, user_id: str, current_trade_date: str) -> None:
         for trade_date in self.pnl_repo.list_non_final_trade_dates(
@@ -601,40 +650,45 @@ class SettlementService:
         target_trade_date = previous_trading_date(current_trade_date)
         if self.pnl_repo.get_daily_pnl(user_id, target_trade_date):
             return False
-        if not self._should_persist_trade_date(user_id, target_trade_date):
-            return False
 
-        can_finalize = False
-        if self._has_post_close_snapshot(user_id, target_trade_date):
-            can_finalize = self.pnl_service.materialize_trade_date_eod_prices(
+        with self._snapshot_lock(user_id, target_trade_date):
+            if self.pnl_repo.get_daily_pnl(user_id, target_trade_date):
+                return False
+            if not self._should_persist_trade_date(user_id, target_trade_date):
+                return False
+
+            can_finalize = False
+            if self._has_post_close_snapshot(user_id, target_trade_date):
+                can_finalize = self.pnl_service.materialize_trade_date_eod_prices(
+                    user_id,
+                    target_trade_date,
+                    is_final=True,
+                    source="close_backfill",
+                )
+            if not can_finalize:
+                can_finalize = self.pnl_service.materialize_trade_date_eod_prices_from_next_day(
+                    user_id,
+                    target_trade_date,
+                    next_trade_date=(
+                        current_trade_date
+                        if current_trade_date == next_trading_date(target_trade_date)
+                        else next_trading_date(target_trade_date)
+                    ),
+                    source="next_day_previous_close",
+                )
+            if not can_finalize:
+                return False
+
+            self.pnl_service.recompute_daily_pnl(
                 user_id,
                 target_trade_date,
+                use_realtime=False,
                 is_final=True,
-                source="close_backfill",
+                persist=True,
             )
-        if not can_finalize:
-            can_finalize = self.pnl_service.materialize_trade_date_eod_prices_from_next_day(
-                user_id,
-                target_trade_date,
-                next_trade_date=(
-                    current_trade_date
-                    if current_trade_date == next_trading_date(target_trade_date)
-                    else next_trading_date(target_trade_date)
-                ),
-                source="next_day_previous_close",
-            )
-        if not can_finalize:
-            return False
-
-        self.pnl_service.recompute_daily_pnl(
-            user_id,
-            target_trade_date,
-            use_realtime=False,
-            is_final=True,
-            persist=True,
-        )
-        self.expire_day_orders(user_id, target_trade_date)
-        return True
+            self.expire_day_orders(user_id, target_trade_date)
+            self.session.commit()
+            return True
 
     def ensure_session_snapshot(self, user_id: str, market_session) -> dict | None:
         self.backfill_pending_history(user_id, market_session.trade_date)
@@ -654,17 +708,9 @@ class SettlementService:
             )
 
         if market_session.market_status == "lunch_break":
-            if not self._should_persist_trade_date(user_id, market_session.trade_date):
-                return None
             if not settings.engine_enabled:
                 self._refresh_trade_date_quotes(user_id, market_session.trade_date)
-            return self.pnl_service.recompute_daily_pnl(
-                user_id,
-                market_session.trade_date,
-                use_realtime=True,
-                is_final=False,
-                persist=True,
-            )
+            return self.ensure_non_final_snapshot(user_id, market_session.trade_date)
 
         if market_session.market_status == "closed":
             return self.ensure_final_snapshot(
@@ -767,17 +813,7 @@ class QueryService:
             return next_trading_date(trade_date)
         return trade_date
 
-    def get_positions(self, user_id: str) -> list[dict]:
-        self._sync_visible_day_order_statuses(user_id)
-        market_session = market_clock.get_session()
-        trade_date = market_session.trade_date
-        sellable_trade_date = self._positions_sellable_trade_date(
-            market_session.market_status, trade_date
-        )
-        lots = self.portfolio_repo.open_lots(user_id)
-        pending_sell = self.portfolio_repo.get_pending_sell_orders_by_symbol(
-            user_id, sellable_trade_date
-        )
+    def _current_position_trade_totals(self, user_id: str) -> dict[str, dict[str, Any]]:
         trade_totals: dict[str, dict[str, Any]] = defaultdict(
             lambda: {
                 "name": "",
@@ -804,6 +840,22 @@ class QueryService:
             else:
                 current["sellShares"] += trade.shares
                 current["sellAmount"] += amount
+            if trade.position_after == 0:
+                trade_totals.pop(trade.symbol, None)
+        return trade_totals
+
+    def get_positions(self, user_id: str) -> list[dict]:
+        self._sync_visible_day_order_statuses(user_id)
+        market_session = market_clock.get_session()
+        trade_date = market_session.trade_date
+        sellable_trade_date = self._positions_sellable_trade_date(
+            market_session.market_status, trade_date
+        )
+        lots = self.portfolio_repo.open_lots(user_id)
+        pending_sell = self.portfolio_repo.get_pending_sell_orders_by_symbol(
+            user_id, sellable_trade_date
+        )
+        trade_totals = self._current_position_trade_totals(user_id)
 
         grouped: dict[str, dict[str, Any]] = {}
         for lot in lots:
@@ -952,40 +1004,10 @@ class QueryService:
 
     def get_closed_positions(self, user_id: str) -> list[dict]:
         self._sync_visible_day_order_statuses(user_id)
-        lots = self.portfolio_repo.all_lots(user_id)
-        if not lots:
-            return []
-
-        remaining_by_symbol: dict[str, int] = defaultdict(int)
-        opened_at_by_symbol: dict[str, datetime] = {}
-        closed_at_by_symbol: dict[str, datetime] = {}
-        lot_name_by_symbol: dict[str, str] = {}
-
-        for lot in lots:
-            remaining_by_symbol[lot.symbol] += lot.remaining_shares
-            if lot.symbol_name and lot.symbol not in lot_name_by_symbol:
-                lot_name_by_symbol[lot.symbol] = lot.symbol_name
-
-            existing_opened_at = opened_at_by_symbol.get(lot.symbol)
-            if existing_opened_at is None or lot.opened_at < existing_opened_at:
-                opened_at_by_symbol[lot.symbol] = lot.opened_at
-
-            if lot.closed_at is not None:
-                existing_closed_at = closed_at_by_symbol.get(lot.symbol)
-                if existing_closed_at is None or lot.closed_at > existing_closed_at:
-                    closed_at_by_symbol[lot.symbol] = lot.closed_at
-
-        closed_symbols = {
-            symbol
-            for symbol, remaining_shares in remaining_by_symbol.items()
-            if remaining_shares == 0
-        }
-        if not closed_symbols:
-            return []
-
-        trade_summary: dict[str, dict[str, Any]] = defaultdict(
+        trade_cycles: dict[str, dict[str, Any]] = defaultdict(
             lambda: {
                 "name": "",
+                "openedAt": None,
                 "buyShares": 0,
                 "buyAmount": 0.0,
                 "sellShares": 0,
@@ -1001,13 +1023,13 @@ class QueryService:
             .where(ExecutionTrade.user_id == user_id)
             .order_by(ExecutionTrade.fill_time.asc(), ExecutionTrade.id.asc())
         )
+        rows: list[dict] = []
         for trade, order in self.session.execute(trade_stmt).all():
-            if trade.symbol not in closed_symbols:
-                continue
-
-            current = trade_summary[trade.symbol]
+            current = trade_cycles[trade.symbol]
             if not current["name"]:
                 current["name"] = order.symbol_name or trade.symbol
+            if current["openedAt"] is None:
+                current["openedAt"] = trade.fill_time
 
             amount = trade.fill_price * trade.shares
             if trade.side == OrderSide.BUY:
@@ -1023,49 +1045,52 @@ class QueryService:
             existing_last_sell_at = current["lastSellAt"]
             if existing_last_sell_at is None or trade.fill_time > existing_last_sell_at:
                 current["lastSellAt"] = trade.fill_time
-
-        rows: list[dict] = []
-        for symbol in closed_symbols:
-            summary = trade_summary.get(symbol)
-            if not summary or summary["buyShares"] <= 0 or summary["sellShares"] <= 0:
+            if trade.position_after != 0:
                 continue
 
-            opened_at = opened_at_by_symbol.get(symbol)
-            closed_at = closed_at_by_symbol.get(symbol) or summary["lastSellAt"]
-            if opened_at is None or closed_at is None:
+            opened_at = current["openedAt"]
+            closed_at = current["lastSellAt"]
+            if (
+                opened_at is None
+                or closed_at is None
+                or current["buyShares"] <= 0
+                or current["sellShares"] <= 0
+            ):
+                trade_cycles.pop(trade.symbol, None)
                 continue
 
             cost_basis_amount = (
-                summary["costBasisAmount"]
-                if summary["costBasisAmount"] > 0
-                else summary["buyAmount"]
+                current["costBasisAmount"]
+                if current["costBasisAmount"] > 0
+                else current["buyAmount"]
             )
             rows.append(
                 {
-                    "symbol": symbol,
-                    "name": summary["name"] or lot_name_by_symbol.get(symbol, symbol),
+                    "symbol": trade.symbol,
+                    "name": current["name"] or trade.symbol,
                     "openedAt": format_dt(opened_at),
                     "closedAt": format_dt(closed_at),
-                    "buyShares": summary["buyShares"],
-                    "sellShares": summary["sellShares"],
+                    "buyShares": current["buyShares"],
+                    "sellShares": current["sellShares"],
                     "buyPrice": (
-                        summary["buyAmount"] / summary["buyShares"]
-                        if summary["buyShares"] > 0
+                        current["buyAmount"] / current["buyShares"]
+                        if current["buyShares"] > 0
                         else 0.0
                     ),
                     "sellPrice": (
-                        summary["sellAmount"] / summary["sellShares"]
-                        if summary["sellShares"] > 0
+                        current["sellAmount"] / current["sellShares"]
+                        if current["sellShares"] > 0
                         else 0.0
                     ),
-                    "realizedPnl": summary["realizedPnl"],
+                    "realizedPnl": current["realizedPnl"],
                     "returnRate": (
-                        summary["realizedPnl"] / cost_basis_amount
+                        current["realizedPnl"] / cost_basis_amount
                         if cost_basis_amount > 0
                         else 0.0
                     ),
                 }
             )
+            trade_cycles.pop(trade.symbol, None)
 
         rows.sort(key=lambda item: (item["closedAt"], item["symbol"]), reverse=True)
         return rows

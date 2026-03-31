@@ -26,8 +26,8 @@ export function ClosedPositionsTab({ rows }: ClosedPositionsTabProps) {
         <h3>已清仓</h3>
         <span>
           {rows.length > 0
-            ? `当前累计 ${formatNumber(rows.length)} 只已完成清仓的股票`
-            : "当前无已清仓股票"}
+            ? `当前累计 ${formatNumber(rows.length)} 次已完成清仓`
+            : "当前无已清仓记录"}
         </span>
       </div>
 
@@ -36,7 +36,7 @@ export function ClosedPositionsTab({ rows }: ClosedPositionsTabProps) {
         rows={
           rows.length > 0
             ? rows.map((row) => (
-                <tr key={row.symbol}>
+                <tr key={`${row.symbol}-${row.openedAt}-${row.closedAt}`}>
                   <td>{row.symbol}</td>
                   <td>{row.name}</td>
                   <td>{row.openedAt}</td>
@@ -56,7 +56,7 @@ export function ClosedPositionsTab({ rows }: ClosedPositionsTabProps) {
             : [
                 <tr key="empty-closed-positions">
                   <td colSpan={10} className="empty-state">
-                    当前无已清仓股票
+                    当前无已清仓记录
                   </td>
                 </tr>,
               ]

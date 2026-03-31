@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from threading import Barrier, Lock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -947,6 +950,123 @@ def test_positions_use_diluted_cost_basis_and_align_with_dashboard_cumulative_pn
         settings.market_now_override = previous_override
 
 
+def test_reopened_position_resets_return_rate_to_new_cycle() -> None:
+    previous_override = settings.market_now_override
+    settings.market_now_override = "2026-03-25T15:10:00+08:00"
+
+    try:
+        with TestClient(app) as client:
+            create_response = client.post(
+                "/api/users", json={"name": f"{TEST_USER_NAME}-reopen", "initialCash": 100000}
+            )
+            assert create_response.status_code == 200
+            user_id = create_response.json()["id"]
+
+            with session_scope() as session:
+                order_repo = OrderRepository(session)
+                portfolio_repo = PortfolioRepository(session)
+                market_repo = MarketDataRepository(session)
+
+                first_buy_time = datetime.strptime(
+                    "2026-03-20 10:00:00", "%Y-%m-%d %H:%M:%S"
+                )
+                close_time = datetime.strptime(
+                    "2026-03-24 14:00:00", "%Y-%m-%d %H:%M:%S"
+                )
+                second_buy_time = datetime.strptime(
+                    "2026-03-25 10:00:00", "%Y-%m-%d %H:%M:%S"
+                )
+
+                create_filled_buy_position(
+                    order_repo=order_repo,
+                    portfolio_repo=portfolio_repo,
+                    user_id=user_id,
+                    trade_date="2026-03-20",
+                    fill_time=first_buy_time,
+                    symbol="000001",
+                    symbol_name="平安银行",
+                    price=10.0,
+                    lots=10,
+                    sellable_shares=1000,
+                )
+                create_filled_sell_execution(
+                    order_repo=order_repo,
+                    portfolio_repo=portfolio_repo,
+                    user_id=user_id,
+                    trade_date="2026-03-24",
+                    fill_time=close_time,
+                    symbol="000001",
+                    symbol_name="平安银行",
+                    price=12.0,
+                    lots=10,
+                )
+                create_filled_buy_position(
+                    order_repo=order_repo,
+                    portfolio_repo=portfolio_repo,
+                    user_id=user_id,
+                    trade_date="2026-03-25",
+                    fill_time=second_buy_time,
+                    symbol="000001",
+                    symbol_name="平安银行",
+                    price=20.0,
+                    lots=2,
+                )
+
+                market_repo.upsert_eod_price(
+                    symbol="000001",
+                    symbol_name="平安银行",
+                    trade_date="2026-03-24",
+                    close_price=12.0,
+                    open_price=11.5,
+                    previous_close=10.5,
+                    high_price=12.1,
+                    low_price=11.4,
+                    is_final=True,
+                    source="test",
+                    published_at=datetime.strptime(
+                        "2026-03-24 15:00:00", "%Y-%m-%d %H:%M:%S"
+                    ),
+                )
+                market_repo.upsert_eod_price(
+                    symbol="000001",
+                    symbol_name="平安银行",
+                    trade_date="2026-03-25",
+                    close_price=21.0,
+                    open_price=20.2,
+                    previous_close=12.0,
+                    high_price=21.2,
+                    low_price=20.0,
+                    is_final=True,
+                    source="test",
+                    published_at=datetime.strptime(
+                        "2026-03-25 15:00:00", "%Y-%m-%d %H:%M:%S"
+                    ),
+                )
+
+            headers = {"x-user-id": user_id}
+            positions_response = client.get("/api/positions", headers=headers)
+            dashboard_response = client.get("/api/dashboard", headers=headers)
+
+            assert positions_response.status_code == 200
+            assert dashboard_response.status_code == 200
+
+            rows = positions_response.json()["rows"]
+            assert len(rows) == 1
+            row = rows[0]
+            assert row["symbol"] == "000001"
+            assert row["shares"] == 200
+            assert row["sellableShares"] == 200
+            assert row["costPrice"] == pytest.approx(20.0)
+            assert row["marketValue"] == pytest.approx(4200.0)
+            assert row["pnl"] == pytest.approx(200.0)
+            assert row["returnRate"] == pytest.approx(0.05)
+
+            dashboard = dashboard_response.json()
+            assert dashboard["metrics"]["cumulativePnl"] == pytest.approx(2200.0)
+    finally:
+        settings.market_now_override = previous_override
+
+
 def test_tick_backfills_missing_previous_trade_day_from_next_day_previous_close() -> None:
     previous_override = settings.market_now_override
     settings.market_now_override = "2026-03-23T15:10:00+08:00"
@@ -1495,6 +1615,136 @@ def test_lunch_break_dashboard_persists_non_final_snapshot_but_calendar_stays_fi
                 assert row is not None
                 assert row.is_final is False
                 assert row.daily_pnl == pytest.approx(500.0)
+    finally:
+        settings.market_now_override = previous_override
+
+
+def test_lunch_break_concurrent_dashboard_queries_share_one_snapshot_persist(
+    monkeypatch,
+) -> None:
+    previous_override = settings.market_now_override
+    settings.market_now_override = "2026-03-25T12:05:00+08:00"
+
+    try:
+        with session_scope() as session:
+            user_id = UserService(session).create_user(
+                name=f"{TEST_USER_NAME}-concurrent",
+                initial_cash=100000,
+            ).id
+            order_repo = OrderRepository(session)
+            portfolio_repo = PortfolioRepository(session)
+            market_repo = MarketDataRepository(session)
+            pnl_repo = PnlRepository(session)
+            pnl_service = PnlService(session)
+
+            buy_time = datetime.strptime(
+                "2026-03-24 10:00:00", "%Y-%m-%d %H:%M:%S"
+            )
+            create_filled_buy_position(
+                order_repo=order_repo,
+                portfolio_repo=portfolio_repo,
+                user_id=user_id,
+                trade_date="2026-03-24",
+                fill_time=buy_time,
+                symbol="000001",
+                symbol_name="平安银行",
+                price=10.0,
+                lots=10,
+                sellable_shares=1000,
+            )
+
+            market_repo.upsert_eod_price(
+                symbol="000001",
+                symbol_name="平安银行",
+                trade_date="2026-03-24",
+                close_price=10.0,
+                open_price=10.0,
+                previous_close=10.0,
+                high_price=10.0,
+                low_price=10.0,
+                is_final=True,
+                source="test",
+                published_at=datetime.strptime(
+                    "2026-03-24 15:00:00", "%Y-%m-%d %H:%M:%S"
+                ),
+            )
+            pnl_service.recompute_daily_pnl(
+                user_id, "2026-03-24", use_realtime=False, is_final=True
+            )
+
+            market_repo.append_intraday_quote(
+                {
+                    "symbol": "sz000001",
+                    "name": "平安银行",
+                    "trade_date": "2026-03-25",
+                    "price": 10.5,
+                    "open": 10.3,
+                    "previousClose": 10.0,
+                    "high": 10.6,
+                    "low": 10.2,
+                    "quoted_at": datetime.strptime(
+                        "2026-03-25 12:00:00", "%Y-%m-%d %H:%M:%S"
+                    ),
+                    "source": "test",
+                }
+            )
+            assert pnl_repo.get_daily_pnl(user_id, "2026-03-25") is None
+
+        original_recompute_daily_pnl = PnlService.recompute_daily_pnl
+        recompute_calls = 0
+        recompute_calls_lock = Lock()
+
+        def wrapped_recompute_daily_pnl(
+            self,
+            user_id: str,
+            trade_date: str,
+            use_realtime: bool,
+            is_final: bool,
+            persist: bool = True,
+        ):
+            nonlocal recompute_calls
+            if trade_date == "2026-03-25" and persist and not is_final:
+                with recompute_calls_lock:
+                    recompute_calls += 1
+                time.sleep(0.1)
+            return original_recompute_daily_pnl(
+                self,
+                user_id,
+                trade_date,
+                use_realtime=use_realtime,
+                is_final=is_final,
+                persist=persist,
+            )
+
+        monkeypatch.setattr(
+            PnlService,
+            "recompute_daily_pnl",
+            wrapped_recompute_daily_pnl,
+        )
+
+        start_barrier = Barrier(4)
+
+        def worker() -> dict:
+            start_barrier.wait()
+            with session_scope() as session:
+                return QueryService(session).get_dashboard(user_id)
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = [
+                future.result()
+                for future in [executor.submit(worker) for _ in range(4)]
+            ]
+
+        assert recompute_calls == 1
+        assert [
+            result["metrics"]["dailyPnl"] for result in results
+        ] == pytest.approx([500.0, 500.0, 500.0, 500.0])
+
+        with session_scope() as session:
+            row = PnlRepository(session).get_daily_pnl(user_id, "2026-03-25")
+            assert row is not None
+            assert row.is_final is False
+            assert row.daily_pnl == pytest.approx(500.0)
     finally:
         settings.market_now_override = previous_override
 
